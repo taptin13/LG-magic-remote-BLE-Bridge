@@ -1,17 +1,29 @@
 # Changelog
 
+## Unreleased — Mac production readiness
+
+### Mac (`MagicRemoteBLE`)
+- Session/peripheral guards on all CoreBluetooth callbacks (`connectionGeneration` + active ID)
+- Auto-reconnect exponential backoff: 1s → 2s → 5s → 10s → 30s (reset on `.ready`)
+- `InputPacketSink` replaces bare `nonisolated(unsafe)` input callback
+- Pointer overlay: probe private CGS; fallback to `NSCursor.hide` + `CGDisplayHideCursor`
+- Version SoT: Info.plist uses `$(MARKETING_VERSION)` / `$(CURRENT_PROJECT_VERSION)` (0.1.1 / 3)
+- Signing: Automatic + team `7MHNHS24T2`, Hardened Runtime, Bluetooth entitlements
+- XCTest target `MagicRemoteBLETests` (packet parse + input sink)
+- Docs: `docs/RELEASE.md` (Developer ID + notarization still required for wide distribution)
+
 ## v0.1.0-rc1 — 2026-07-31
 
-Baseline đã flash + build/run Mac app trên máy dev (ESP32 + MagicRemoteBLE).
+Baseline flashed and Mac app built/run on the development machine (ESP32 + MagicRemoteBLE).
 
 ### Firmware (`esp32-proxy-idf`)
-- BleCoreTask: sole owner GAP / GATTC / SM inject / Event notify
-- Discovery: host callback enqueue `ble_disc_evt_t`; validate `conn` + `conn_gen` + `disc_gen`
-- TX: motion latest-value, button/status queue, `s_tx_mu` bao mọi truy cập queue
-- `s_pending_rel` — synthetic button release không mất khi overflow
-- Mac ready = Event CCCD + encrypted; CMD `isfinite` validate
+- BleCoreTask: sole owner of GAP / GATTC / SM inject / Event notify
+- Discovery: host callbacks enqueue `ble_disc_evt_t`; validate `conn` + `conn_gen` + `disc_gen`
+- TX: motion latest-value, button/status queue, `s_tx_mu` covers all queue access
+- `s_pending_rel` — synthetic button release not lost on overflow
+- Mac ready = Event CCCD + encrypted; CMD `isfinite` validation
 - Metrics + phase deadlines (scan/connect/security/discovery)
-- `bridge_state` là source of truth cho remote link (không còn RM_* song song)
+- `bridge_state` is the source of truth for the remote link (no parallel `RM_*`)
 
 ### Mac (`MagicRemoteBLE`)
 - Auto scan→connect, prefs, mouse mode, adaptive smooth

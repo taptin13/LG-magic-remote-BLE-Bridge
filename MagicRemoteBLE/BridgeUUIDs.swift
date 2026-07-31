@@ -6,7 +6,7 @@ enum BridgeUUID {
     static let event = CBUUID(string: "6D520010-4D52-3235-4741-425249444745")
     static let status = CBUUID(string: "6D520003-4D52-3235-4741-425249444745")
     static let command = CBUUID(string: "6D520012-4D52-3235-4741-425249444745")
-    /// Legacy HID char (esp32-ble-bridge cũ) — bỏ dần
+    /// Legacy HID char (old esp32-ble-bridge) — being phased out
     static let hid = CBUUID(string: "6D520002-4D52-3235-4741-425249444745")
     static let advertisedName = "MR-Proxy"
 

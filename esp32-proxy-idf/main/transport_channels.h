@@ -8,7 +8,7 @@ extern "C" {
 
 /**
  * Typed transport API — motion latest / button reliable / status latest.
- * Hiện ủy quyền ble_core_submit_packet (TX owner).
+ * Currently delegates to ble_core_submit_packet (TX owner).
  */
 
 void transport_channels_init(void);

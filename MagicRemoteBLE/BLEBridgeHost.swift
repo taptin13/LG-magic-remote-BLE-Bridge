@@ -18,13 +18,13 @@ final class BLEBridgeHost: NSObject, ObservableObject {
     @Published private(set) var remoteStatus = "—"
     @Published private(set) var eventCount = 0
     @Published private(set) var logs: [LogEntry] = []
-    /// Bật: BT On → Scan → Connect tự động (và reconnect sau mất kết nối).
+    /// When on: BT On → Scan → Connect automatically (and reconnect after disconnect).
     @Published var autoConnect = true
 
     var onPacket: ((BridgePacket) -> Void)?
-    /// Callback inject input — set từ MainActor, gọi từ BLE queue.
-    nonisolated(unsafe) var onInputPacket: ((BridgePacket) -> Void)?
-    /// Gọi khi prefs cần lưu (preferred UUID / autoConnect).
+    /// Thread-safe input sink — set from MainActor, delivered from BLE queue.
+    let inputSink = InputPacketSink()
+    /// Called when prefs need saving (preferred UUID / autoConnect).
     var onPrefsChanged: (() -> Void)?
 
     private let bleQueue = DispatchQueue(label: "mr.ble", qos: .userInteractive)
@@ -34,14 +34,22 @@ final class BLEBridgeHost: NSObject, ObservableObject {
     private var eventChar: CBCharacteristic?
     private var statusChar: CBCharacteristic?
     private var cmdChar: CBCharacteristic?
-    /// Chỉ `.ready` sau khi Event CCCD confirm (`didUpdateNotificationStateFor`).
+    /// `.ready` only after Event CCCD confirms (`didUpdateNotificationStateFor`).
     private var awaitingEventNotify = false
-    /// UUID đã connect thành công — ưu tiên lần sau.
+    /// Successfully connected UUID — preferred next time.
     private(set) var preferredPeripheralID: UUID?
-    /// User bấm Disconnect → không auto reconnect đến khi Reconnect/Scan.
+    /// User tapped Disconnect → no auto reconnect until Reconnect/Scan.
     private var userStoppedAuto = false
     private var autoConnectScheduled = false
     private var connectingID: UUID?
+    /// Bumped on every session bind/clear — stale CoreBluetooth callbacks must ignore old gens.
+    private(set) var connectionGeneration: UInt64 = 0
+    /// Mirrored for BLE-queue guards (written only from MainActor with session changes).
+    nonisolated(unsafe) private var sessionPeripheralID: UUID?
+    nonisolated(unsafe) private var sessionGeneration: UInt64 = 0
+    /// Exponential reconnect backoff index (reset when `.ready`).
+    private var reconnectAttempt = 0
+    private static let reconnectBackoff: [TimeInterval] = [1, 2, 5, 10, 30]
 
     override init() {
         super.init()
@@ -54,7 +62,7 @@ final class BLEBridgeHost: NSObject, ObservableObject {
         if let preferredID { selectedID = preferredID }
     }
 
-    /// Tạo lại CBCentralManager để kích hoạt popup quyền (bundle mới / sau reset TCC).
+    /// Recreate CBCentralManager to trigger permission prompt (new bundle / after TCC reset).
     func requestBluetoothPermission() {
         disconnect(userInitiated: true)
         recreateCentral(reason: "request permission")
@@ -89,10 +97,11 @@ final class BLEBridgeHost: NSObject, ObservableObject {
 
     func clearLogs() { logs.removeAll() }
 
-    /// Bắt đầu (lại) luồng auto Scan → Connect.
+    /// Start (or restart) auto Scan → Connect flow.
     func reconnect() {
         userStoppedAuto = false
         autoConnect = true
+        reconnectAttempt = 0
         onPrefsChanged?()
         beginAutoConnect(reason: "reconnect")
     }
@@ -113,7 +122,7 @@ final class BLEBridgeHost: NSObject, ObservableObject {
     func startScan() {
         guard bluetoothOK else { return }
         devices.removeAll()
-        /* Giữ preferred trong map nếu còn — CoreBluetooth có thể trả lại cùng object. */
+        /* Keep preferred in map if still present — CoreBluetooth may return the same object. */
         let keep = preferredPeripheralID.flatMap { peripherals[$0] }
         peripherals.removeAll()
         if let keep { peripherals[keep.identifier] = keep }
@@ -128,7 +137,7 @@ final class BLEBridgeHost: NSObject, ObservableObject {
             guard let self, self.phase == .scanning else { return }
             self.central.scanForPeripherals(withServices: nil, options: nil)
         }
-        /* Không thấy preferred sau 3s → nối device mạnh nhất đang thấy. */
+        /* Preferred not seen after 3s → connect strongest device currently visible. */
         DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
             guard let self, self.phase == .scanning, self.autoConnect, !self.userStoppedAuto else { return }
             guard self.connectingID == nil, self.active == nil else { return }
@@ -157,15 +166,14 @@ final class BLEBridgeHost: NSObject, ObservableObject {
         guard phase == .scanning || phase == .idle || phase == .failed else { return }
         if connectingID == peripheral.identifier { return }
         stopScan()
-        active = peripheral
-        selectedID = peripheral.identifier
+        bindSession(to: peripheral)
         connectingID = peripheral.identifier
         phase = .connecting
         log(.matrix, "Connecting \(peripheral.name ?? peripheral.identifier.uuidString)…")
         central.connect(peripheral, options: nil)
     }
 
-    /// Ưu tiên preferred UUID; không có thì lấy RSSI mạnh nhất.
+    /// Prefer preferred UUID; otherwise pick strongest RSSI.
     private func maybeAutoConnect(to item: DiscoveredBridge) {
         guard autoConnect, !userStoppedAuto, phase == .scanning else { return }
         if let preferred = preferredPeripheralID {
@@ -173,7 +181,7 @@ final class BLEBridgeHost: NSObject, ObservableObject {
                 selectedID = item.id
                 connectSelected()
             }
-            /* Khác UUID — chờ preferred hoặc timeout trong startScan. */
+            /* Different UUID — wait for preferred or timeout in startScan. */
             return
         }
         selectedID = item.id
@@ -189,7 +197,16 @@ final class BLEBridgeHost: NSObject, ObservableObject {
         clearSession(phase: .idle)
     }
 
+    private func bindSession(to peripheral: CBPeripheral) {
+        connectionGeneration &+= 1
+        active = peripheral
+        selectedID = peripheral.identifier
+        sessionPeripheralID = peripheral.identifier
+        sessionGeneration = connectionGeneration
+    }
+
     private func clearSession(phase next: Phase) {
+        connectionGeneration &+= 1
         active = nil
         eventChar = nil
         statusChar = nil
@@ -197,23 +214,41 @@ final class BLEBridgeHost: NSObject, ObservableObject {
         awaitingEventNotify = false
         connectingID = nil
         remoteStatus = "—"
+        sessionPeripheralID = nil
+        sessionGeneration = connectionGeneration
         phase = next
+    }
+
+    private func isCurrentPeripheral(_ peripheral: CBPeripheral) -> Bool {
+        active?.identifier == peripheral.identifier
+    }
+
+    nonisolated private func isSessionPeripheral(_ peripheral: CBPeripheral) -> Bool {
+        sessionPeripheralID == peripheral.identifier
     }
 
     private func scheduleAutoReconnect() {
         guard autoConnect, !userStoppedAuto, bluetoothOK else { return }
         guard !autoConnectScheduled else { return }
         autoConnectScheduled = true
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
+        let idx = min(reconnectAttempt, Self.reconnectBackoff.count - 1)
+        let delay = Self.reconnectBackoff[idx]
+        reconnectAttempt += 1
+        log(.info, "Auto-reconnect in \(Int(delay))s (attempt \(reconnectAttempt))")
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self else { return }
             self.autoConnectScheduled = false
             self.beginAutoConnect(reason: "after disconnect")
         }
     }
 
+    private func resetReconnectBackoff() {
+        reconnectAttempt = 0
+    }
+
     func sendCommand(_ bytes: [UInt8]) {
         guard let p = active, let c = cmdChar, !bytes.isEmpty else { return }
-        /* .withResponse: bắt lỗi khi CMD yêu cầu encryption (pair chưa xong). */
+        /* .withResponse: surface errors when CMD requires encryption (pairing not finished). */
         p.writeValue(Data(bytes), for: c, type: .withResponse)
     }
 
@@ -264,7 +299,7 @@ extension BLEBridgeHost: CBCentralManagerDelegate {
         }
     }
 
-    /// Mở System Settings → Privacy → Bluetooth.
+    /// Open System Settings → Privacy → Bluetooth.
     func openBluetoothPrivacySettings() {
         let urls = [
             "x-apple.systempreferences:com.apple.preference.security?Privacy_Bluetooth",
@@ -308,6 +343,10 @@ extension BLEBridgeHost: CBCentralManagerDelegate {
 
     nonisolated func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
         Task { @MainActor in
+            guard isCurrentPeripheral(peripheral) else {
+                log(.info, "Ignoring stale didConnect for \(peripheral.identifier.uuidString.prefix(8))")
+                return
+            }
             phase = .discovering
             log(.info, "Connected — discovering MR-Proxy service")
             peripheral.delegate = self
@@ -317,6 +356,7 @@ extension BLEBridgeHost: CBCentralManagerDelegate {
 
     nonisolated func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
         Task { @MainActor in
+            guard connectingID == peripheral.identifier || isCurrentPeripheral(peripheral) else { return }
             let ns = error as NSError?
             let msg = error?.localizedDescription ?? "?"
             log(.error, "Connect failed: \(msg)")
@@ -333,6 +373,7 @@ extension BLEBridgeHost: CBCentralManagerDelegate {
 
     nonisolated func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
         Task { @MainActor in
+            guard isCurrentPeripheral(peripheral) || connectingID == peripheral.identifier else { return }
             let unexpected = error != nil || !userStoppedAuto
             log(.info, "Disconnected \(error?.localizedDescription ?? "")")
             clearSession(phase: .idle)
@@ -346,6 +387,7 @@ extension BLEBridgeHost: CBCentralManagerDelegate {
 extension BLEBridgeHost: CBPeripheralDelegate {
     nonisolated func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
         Task { @MainActor in
+            guard isCurrentPeripheral(peripheral) else { return }
             if let error {
                 log(.error, "Services: \(error.localizedDescription)")
                 phase = .failed
@@ -367,6 +409,7 @@ extension BLEBridgeHost: CBPeripheralDelegate {
 
     nonisolated func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
         Task { @MainActor in
+            guard isCurrentPeripheral(peripheral) else { return }
             if let error {
                 log(.error, "Chars: \(error.localizedDescription)")
                 phase = .failed
@@ -405,6 +448,7 @@ extension BLEBridgeHost: CBPeripheralDelegate {
         error: Error?
     ) {
         Task { @MainActor in
+            guard isCurrentPeripheral(peripheral) else { return }
             if let error {
                 log(.error, "Notify \(characteristic.uuid): \(error.localizedDescription)")
                 if characteristic.uuid == BridgeUUID.event || characteristic.uuid == BridgeUUID.hid {
@@ -425,17 +469,20 @@ extension BLEBridgeHost: CBPeripheralDelegate {
             awaitingEventNotify = false
             rememberPreferred(peripheral.identifier)
             userStoppedAuto = false
+            resetReconnectBackoff()
             phase = .ready
             log(.matrix, "Ready — Event notify OK")
         }
     }
 
     nonisolated func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
+        guard isSessionPeripheral(peripheral) else { return }
         guard error == nil, let data = characteristic.value, !data.isEmpty else { return }
         let uuid = characteristic.uuid
         if uuid == BridgeUUID.status {
             let st = data[0]
             Task { @MainActor in
+                guard isCurrentPeripheral(peripheral) else { return }
                 remoteStatus = BridgeUUID.statusLabel(st)
                 log(.info, "ESP32 status: \(remoteStatus)")
             }
@@ -444,17 +491,18 @@ extension BLEBridgeHost: CBPeripheralDelegate {
         guard uuid == BridgeUUID.event || uuid == BridgeUUID.hid else { return }
         guard let pkt = BridgePacket.parse(data) else { return }
 
-        /* Motion: chỉ inject trên BLE queue — không hop MainActor (mượt hơn). */
+        /* Motion: inject on BLE queue only — no MainActor hop (smoother). */
         if pkt.type == .motion {
-            onInputPacket?(pkt)
+            inputSink.deliver(pkt)
             return
         }
 
         if pkt.type == .button || pkt.type == .voice {
-            onInputPacket?(pkt)
+            inputSink.deliver(pkt)
         }
 
         Task { @MainActor in
+            guard isCurrentPeripheral(peripheral) else { return }
             if pkt.type != .motion { eventCount += 1 }
             onPacket?(pkt)
             if pkt.type == .button {
@@ -470,6 +518,7 @@ extension BLEBridgeHost: CBPeripheralDelegate {
     ) {
         guard characteristic.uuid == BridgeUUID.command else { return }
         Task { @MainActor in
+            guard isCurrentPeripheral(peripheral) else { return }
             if let error {
                 let ns = error as NSError
                 log(.error, "CMD write failed: \(error.localizedDescription)")

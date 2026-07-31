@@ -2,39 +2,46 @@ import AppKit
 import ApplicationServices
 import Combine
 
-/// Nhận BridgePacket → CGEvent theo `keyMaps`.
-/// Motion chạy lock — không bắt buộc MainActor (mượt hơn khi BLE notify dồn).
+/// Converts BridgePacket → CGEvent via `keyMaps`.
+/// Motion runs under lock — MainActor not required (smoother when BLE notifies pile up).
 final class InputMapper: ObservableObject {
     @Published var enabled = false
     @Published private(set) var trusted = false
     @Published private(set) var status = "off"
-    /// Chuột bay: OK=L, Settings=R, Back=Mouse Back; motion chỉ khi bật.
+    /// Air mouse: OK=L, Settings=R, Back=Mouse Back; motion only when enabled.
     @Published private(set) var mouseMode = false
 
     var onLog: ((LogLevel, String) -> Void)?
-    /// Lookup map hiện tại (AppModel cung cấp) — chỉ dùng khi chưa có cache.
+    /// Current map lookup (provided by AppModel) — used only when cache is empty.
     var resolveMap: ((UInt16) -> KeyMapRow?)?
-    /// Báo AppModel hiện Magic pointer (chỉ khi remote điều khiển).
+    /// Notify AppModel to show Magic pointer (only when remote is driving).
     var onRemotePointerActivity: (() -> Void)?
 
     private let lock = NSLock()
     private var heldKey: CGKeyCode?
     private var heldFlags: CGEventFlags = []
     private var mouseButtons: UInt16 = 0
+    /// Keyboard-style autorepeat while remote button is held (uses System Settings rates).
+    private var keyRepeatTimer: DispatchSourceTimer?
+    private var keyRepeatVK: CGKeyCode?
+    private var keyRepeatFlags: CGEventFlags = []
+    private var mediaRepeatTimer: DispatchSourceTimer?
+    private var mediaRepeatKey: Int32?
+    private let keyRepeatQueue = DispatchQueue(label: "mr.key.repeat", qos: .userInteractive)
     private var enabledFlag = false
     private var trustedFlag = false
     private var smoothingFlag = true
     private var nativeScrollFlag = true
     private var mouseModeFlag = false
-    /// Cache map — tránh resolveMap hop MainActor từ BLE queue (deadlock).
+    /// Cached map — avoids resolveMap hopping to MainActor from BLE queue (deadlock).
     private var mapCache: [UInt16: KeyMapRow] = [:]
 
     private static let btnBack: UInt16 = 0x8028
     private static let btnSettings: UInt16 = 0x8043
     private static let btnOK: UInt16 = 0x8044
 
-    /// Click / scroll / phím: remote khó giữ yên → đóng băng motion tạm thời.
-    /// hardLock = không được phá (chống cộng dồn rung tay). softFreeze = phá nếu rê mạnh một phát.
+    /// Click / scroll / key: remote is hard to hold still → temporarily freeze motion.
+    /// hardLock = cannot break (prevents hand-shake accumulation). softFreeze = break on a strong swipe.
     private var dragArmed = false
     private var dragAccum: Double = 0
     private var clickSettleUntil: CFAbsoluteTime = 0
@@ -46,7 +53,7 @@ final class InputMapper: ObservableObject {
     private var lastBreakDY = 0.0
     private var lastClickUpAt: CFAbsoluteTime = 0
 
-    /// Đếm click cho CGEvent (HID không tự gán clickState → app không nhận double-click).
+    /// Click count for CGEvent (HID does not set clickState → apps miss double-click).
     private var mouseClickCount: Int64 = 0
     private var lastMouseDownUptime: TimeInterval = 0
     private var lastMouseDownQuartz = CGPoint.zero
@@ -61,25 +68,25 @@ final class InputMapper: ObservableObject {
     private static let keyHardSec: CFTimeInterval = 0.16
     private static let keySoftSec: CFTimeInterval = 0.08
     private static let postGateSec: CFTimeInterval = 0.10
-    /// Cửa sổ double-click hệ thống — giữ pointer chết trong khoảng này.
+    /// System double-click window — keep pointer frozen during this interval.
     private static let doubleClickWindow: CFTimeInterval = 0.55
-    /// Một gói motion lớn mới được coi là rê chủ ý (không cộng dồn rung).
+    /// A large motion packet counts as intentional swipe (not accumulated shake).
     private static let instantBreakMag: Double = 18
-    /// Chuỗi motion cùng hướng sau hard-lock.
+    /// Same-direction motion streak after hard-lock.
     private static let coherentBreakThreshold: Double = 55
     private static let motionGateEpsilon: Double = 0.8
 
-    /// Display-paced smoothing: gói BLE giật → chia nhỏ theo ~125Hz.
+    /// Display-paced smoothing: jittery BLE packets → subdivide at ~125Hz.
     private var pendingDX = 0.0
     private var pendingDY = 0.0
-    /// nil = mouseMoved; left/right/center = đúng loại *Dragged.
+    /// nil = mouseMoved; left/right/center = correct *Dragged type.
     private var pendingDragButton: CGMouseButton?
     private var smoothTimer: DispatchSourceTimer?
     private var lastSmoothAt: CFAbsoluteTime = 0
     private var lastPointerActivityAt: CFAbsoluteTime = 0
     private let smoothQueue = DispatchQueue(label: "mr.mouse.smooth", qos: .userInteractive)
 
-    /// Adaptive tau theo tốc độ residual (nhỏ → mượt; nhanh → ít trễ).
+    /// Adaptive tau by residual speed (low → smooth; fast → less lag).
     private static let pendingMotionCap: Double = 64
     private static let pointerActivityMinInterval: CFTimeInterval = 1.0 / 45.0
 
@@ -106,7 +113,7 @@ final class InputMapper: ObservableObject {
     func refreshTrust() {
         trusted = AXIsProcessTrusted()
         trustedFlag = trusted
-        if enabled && !trusted { status = "cần Accessibility" }
+        if enabled && !trusted { status = "needs Accessibility" }
     }
 
     @MainActor
@@ -118,15 +125,15 @@ final class InputMapper: ObservableObject {
             guard trusted else {
                 enabled = false
                 enabledFlag = false
-                status = "cần Accessibility"
-                onLog?(.error, "Bật Accessibility cho MagicRemoteBLE")
+                status = "needs Accessibility"
+                onLog?(.error, "Enable Accessibility for MagicRemoteBLE")
                 return
             }
             enabled = true
             enabledFlag = true
             status = "mapping"
             ensureSmoothTimer()
-            onLog?(.matrix, "Input ON — map theo Config")
+            onLog?(.matrix, "Input ON — mapping from config")
         } else {
             releaseAllInputs()
             stopSmoothTimer()
@@ -147,7 +154,7 @@ final class InputMapper: ObservableObject {
         nativeScrollFlag = on
     }
 
-    /// Gọi từ MainActor khi keyMaps đổi.
+    /// Call from MainActor when keyMaps change.
     func updateMaps(_ rows: [KeyMapRow]) {
         var next: [UInt16: KeyMapRow] = [:]
         next.reserveCapacity(rows.count)
@@ -169,7 +176,7 @@ final class InputMapper: ObservableObject {
         DispatchQueue.main.async { [weak self] in
             self?.mouseMode = on
         }
-        logAsync(.ok, on ? "Mouse mode ON — OK=L · Settings=R · Back=MouseBack" : "Mouse mode OFF — phím theo map")
+        logAsync(.ok, on ? "Mouse mode ON — OK=L · Settings=R · Back=MouseBack" : "Mouse mode OFF — keys follow map")
     }
 
     private func logAsync(_ level: LogLevel, _ msg: String) {
@@ -185,7 +192,7 @@ final class InputMapper: ObservableObject {
         return row
     }
 
-    /// Gọi từ BLE queue (không MainActor) — path chuột ưu tiên.
+    /// Called from BLE queue (not MainActor) — mouse path takes priority.
     func handle(_ packet: BridgePacket) {
         guard enabledFlag, trustedFlag else { return }
         switch packet.type {
@@ -211,7 +218,7 @@ final class InputMapper: ObservableObject {
             scroll(deltaY: Int32(wheel))
         }
 
-        /* Chuột bay tắt → nuốt dx/dy. */
+        /* Air mouse off → swallow dx/dy. */
         guard mouseOn, dx != 0 || dy != 0 else { return }
 
         let holding = dragBtn != nil
@@ -235,7 +242,7 @@ final class InputMapper: ObservableObject {
         }
     }
 
-    /// Ưu tiên L → R → Middle khi giữ nhiều nút.
+    /// Prefer L → R → Middle when multiple buttons held.
     private static func dragButton(from mask: UInt16) -> CGMouseButton? {
         if (mask & 1) != 0 { return .left }
         if (mask & 2) != 0 { return .right }
@@ -263,7 +270,7 @@ final class InputMapper: ObservableObject {
         }
     }
 
-    /// Mouse mode: OK=L, Settings=R, Back=Mouse Back. Ngược lại: map bình thường (+ Siri / Mouse toggle).
+    /// Mouse mode: OK=L, Settings=R, Back=Mouse Back. Otherwise: normal map (+ Siri / Mouse toggle).
     private func applyButton(code: UInt16, down: Bool) {
         lock.lock()
         let mouseOn = mouseModeFlag
@@ -321,7 +328,7 @@ final class InputMapper: ObservableObject {
             if (mb & 4) != 0 { mouseClick(button: .center, down: false) }
             if (mb & 8) != 0 { mouseBack(down: false) }
             if !next { discardPendingMotion() }
-            /* Chỉ async lên main — không sync MainActor từ BLE (tránh treo). */
+            /* Async to main only — do not sync MainActor from BLE (avoids hang). */
             DispatchQueue.main.async { [weak self] in
                 self?.mouseMode = next
             }
@@ -329,12 +336,14 @@ final class InputMapper: ObservableObject {
             return
         }
 
-        freezeMotion(hard: Self.keyHardSec, soft: Self.keySoftSec)
-
         if let media = Self.mediaHID[row.key] {
             if down {
+                freezeMotion(hard: Self.keyHardSec, soft: Self.keySoftSec)
                 postMedia(media, down: true)
                 postMedia(media, down: false)
+                startMediaRepeat(media)
+            } else {
+                stopMediaRepeat()
             }
             return
         }
@@ -346,16 +355,100 @@ final class InputMapper: ObservableObject {
         if (row.mod & 0x04) != 0 { flags.insert(.maskAlternate) }
         if (row.mod & 0x08) != 0 { flags.insert(.maskCommand) }
 
-        key(vk, down: down, flags: flags)
-        lock.lock()
         if down {
+            freezeMotion(hard: Self.keyHardSec, soft: Self.keySoftSec)
+            /* New key while another held — release previous (decoder usually does this). */
+            lock.lock()
+            let prev = heldKey
+            let prevFlags = heldFlags
+            lock.unlock()
+            if let prev, prev != vk {
+                stopKeyRepeat()
+                key(prev, down: false, flags: prevFlags)
+            }
+            key(vk, down: true, flags: flags)
+            lock.lock()
             heldKey = vk
             heldFlags = flags
-        } else if heldKey == vk {
-            heldKey = nil
-            heldFlags = []
+            lock.unlock()
+            startKeyRepeat(vk: vk, flags: flags)
+        } else {
+            stopKeyRepeat()
+            key(vk, down: false, flags: flags)
+            lock.lock()
+            if heldKey == vk {
+                heldKey = nil
+                heldFlags = []
+            }
+            lock.unlock()
         }
+    }
+
+    private static var systemKeyRepeatDelay: TimeInterval {
+        let d = NSEvent.keyRepeatDelay
+        return d > 0.05 ? d : 0.35
+    }
+
+    private static var systemKeyRepeatInterval: TimeInterval {
+        let i = NSEvent.keyRepeatInterval
+        return i > 0.01 ? i : 0.05
+    }
+
+    private func startKeyRepeat(vk: CGKeyCode, flags: CGEventFlags) {
+        stopKeyRepeat()
+        lock.lock()
+        keyRepeatVK = vk
+        keyRepeatFlags = flags
         lock.unlock()
+        let delay = Self.systemKeyRepeatDelay
+        let interval = Self.systemKeyRepeatInterval
+        let t = DispatchSource.makeTimerSource(queue: keyRepeatQueue)
+        t.schedule(deadline: .now() + delay, repeating: interval, leeway: .milliseconds(4))
+        t.setEventHandler { [weak self] in
+            guard let self else { return }
+            self.lock.lock()
+            guard let code = self.keyRepeatVK, self.heldKey == code else {
+                self.lock.unlock()
+                return
+            }
+            let f = self.keyRepeatFlags
+            self.lock.unlock()
+            self.key(code, down: true, flags: f, autorepeat: true)
+        }
+        t.resume()
+        keyRepeatTimer = t
+    }
+
+    private func stopKeyRepeat() {
+        keyRepeatTimer?.cancel()
+        keyRepeatTimer = nil
+        lock.lock()
+        keyRepeatVK = nil
+        keyRepeatFlags = []
+        lock.unlock()
+    }
+
+    private func startMediaRepeat(_ media: Int32) {
+        stopMediaRepeat()
+        mediaRepeatKey = media
+        let delay = Self.systemKeyRepeatDelay
+        let interval = Self.systemKeyRepeatInterval
+        let t = DispatchSource.makeTimerSource(queue: keyRepeatQueue)
+        t.schedule(deadline: .now() + delay, repeating: interval, leeway: .milliseconds(4))
+        t.setEventHandler { [weak self] in
+            guard let self else { return }
+            guard let m = self.mediaRepeatKey else { return }
+            self.postMedia(m, down: true)
+            self.postMedia(m, down: false)
+        }
+        t.resume()
+        mediaRepeatTimer = t
+    }
+
+    private func stopMediaRepeat() {
+        mediaRepeatTimer?.cancel()
+        mediaRepeatTimer = nil
+        mediaRepeatKey = nil
     }
 
     private func setSyntheticMouseBit(_ bit: UInt16, down: Bool) {
@@ -459,7 +552,7 @@ final class InputMapper: ObservableObject {
     }
     private func scroll(deltaY: Int32) {
         guard deltaY != 0 else { return }
-        /* Native (macOS) = đảo chiều (Natural Scrolling). Tắt = hướng Windows. */
+        /* Native (macOS) = inverted (Natural Scrolling). Off = Windows direction. */
         let dy = nativeScrollFlag ? -deltaY : deltaY
         guard let ev = CGEvent(
             scrollWheelEvent2Source: nil,
@@ -472,7 +565,7 @@ final class InputMapper: ObservableObject {
         ev.post(tap: .cghidEventTap)
     }
 
-    /// hard: tuyệt đối không rê. soft: chỉ phá nếu rê mạnh/cùng hướng (không cộng rung).
+    /// hard: no movement at all. soft: break only on strong/same-direction swipe (no shake accumulation).
     private func freezeMotion(hard: CFTimeInterval, soft: CFTimeInterval, postGate: Bool = true) {
         lock.lock()
         let now = CFAbsoluteTimeGetCurrent()
@@ -483,7 +576,7 @@ final class InputMapper: ObservableObject {
         if postGate {
             postGateUntil = softUntil + Self.postGateSec
         } else {
-            /* Giữ yên hết soft — phục vụ double-click / scroll. */
+            /* Stay frozen through soft — for double-click / scroll. */
             postGateUntil = 0
         }
         coherentBreakAccum = 0
@@ -508,7 +601,7 @@ final class InputMapper: ObservableObject {
         lock.unlock()
     }
 
-    /// `nil` = nuốt; có giá trị = motion đã nhân gain post-gate.
+    /// `nil` = swallow; non-nil = motion after post-gate gain applied.
     private func gatedMotion(dx: Double, dy: Double) -> (dx: Double, dy: Double)? {
         lock.lock()
         defer { lock.unlock() }
@@ -523,7 +616,7 @@ final class InputMapper: ObservableObject {
         }
 
         if now < softFreezeUntil {
-            /* Phá sớm chỉ khi: (1) một phát đủ lớn, hoặc (2) chuỗi cùng hướng. */
+            /* Early break only when: (1) single packet large enough, or (2) same-direction streak. */
             if mag >= Self.instantBreakMag {
                 clearFreezeLocked(now: now)
             } else {
@@ -589,13 +682,13 @@ final class InputMapper: ObservableObject {
         lock.unlock()
     }
 
-    /// `false` = nuốt nhiễu khi bấm; `true` = đã vượt ngưỡng → cho drag.
+    /// `false` = swallow noise while pressing; `true` = passed threshold → allow drag.
     private func allowDragMotion(dx: Double, dy: Double) -> Bool {
         lock.lock()
         defer { lock.unlock() }
         if dragArmed { return true }
         let now = CFAbsoluteTimeGetCurrent()
-        /* Trong hard-lock / settle: không drag. */
+        /* During hard-lock / settle: no drag. */
         if now < hardLockUntil || now < clickSettleUntil { return false }
         dragAccum += hypot(dx, dy)
         if dragAccum < Self.dragThreshold { return false }
@@ -611,10 +704,12 @@ final class InputMapper: ObservableObject {
         logAsync(.ok, "Siri")
     }
 
-    /// Gọi khi disconnect / fail / tắt mapping — tránh kẹt phím/chuột.
+    /// Call on disconnect / fail / mapping off — avoid stuck keys/mouse.
     func releaseAllInputs() {
-        /* Disconnect: bỏ pending — không flush (tránh nhảy chuột sau mất kết nối). */
+        /* Disconnect: drop pending — do not flush (avoids cursor jump after disconnect). */
         discardPendingMotion()
+        stopKeyRepeat()
+        stopMediaRepeat()
         lock.lock()
         let vk = heldKey
         let flags = heldFlags
@@ -640,7 +735,7 @@ final class InputMapper: ObservableObject {
         guard let primary = NSScreen.screens.first else { return .null }
         var bounds = CGRect.null
         for s in NSScreen.screens {
-            // Quartz: origin = top-left primary; Y xuống dưới.
+            // Quartz: origin = top-left primary; Y increases downward.
             let top = primary.frame.maxY - s.frame.maxY
             let r = CGRect(x: s.frame.minX, y: top, width: s.frame.width, height: s.frame.height)
             bounds = bounds.union(r)
@@ -648,7 +743,7 @@ final class InputMapper: ObservableObject {
         return bounds
     }
 
-    /// Luôn flip theo screens[0] (primary/menu bar) — KHÔNG dùng NSScreen.main (đổi theo focus).
+    /// Always flip using screens[0] (primary/menu bar) — do NOT use NSScreen.main (changes with focus).
     private static func cocoaToQuartz(_ p: CGPoint) -> CGPoint {
         guard let primary = NSScreen.screens.first else { return p }
         return CGPoint(x: p.x, y: primary.frame.maxY - p.y)
@@ -736,7 +831,7 @@ final class InputMapper: ObservableObject {
         ev.post(tap: .cghidEventTap)
     }
 
-    /// Nút Back trên chuột (XButton1 / buttonNumber 3) — browser Back, v.v.
+    /// Back button on mouse (XButton1 / buttonNumber 3) — browser Back, etc.
     private func mouseBack(down: Bool) {
         let loc = NSEvent.mouseLocation
         let pos = Self.cocoaToQuartz(loc)
@@ -753,9 +848,12 @@ final class InputMapper: ObservableObject {
         ev.post(tap: .cghidEventTap)
     }
 
-    private func key(_ code: CGKeyCode, down: Bool, flags: CGEventFlags = []) {
+    private func key(_ code: CGKeyCode, down: Bool, flags: CGEventFlags = [], autorepeat: Bool = false) {
         let ev = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: down)
         ev?.flags = flags
+        if down && autorepeat {
+            ev?.setIntegerValueField(.keyboardEventAutorepeat, value: 1)
+        }
         ev?.post(tap: .cghidEventTap)
     }
 

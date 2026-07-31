@@ -12,7 +12,7 @@ final class AppModel: ObservableObject {
     @Published var lastButtonCode: UInt16 = 0
     @Published var lastButtonName = ""
 
-    /// Airmouse — gửi xuống ESP qua CMD 0x02.
+    /// Airmouse — sent to ESP via CMD 0x02.
     @Published var sensitivity: Double = 0.045 {
         didSet { if !loadingPrefs { schedulePushAirmouse() } }
     }
@@ -23,11 +23,11 @@ final class AppModel: ObservableObject {
         didSet { if !loadingPrefs { schedulePushAirmouse() } }
     }
 
-    /// Pointer webOS + làm mượt motion trên Mac.
+    /// webOS-style pointer + motion smoothing on Mac.
     @Published var largePointer = true {
         didSet { if !loadingPrefs { saveAirmousePrefs(); syncPointerOverlay() } }
     }
-    /// 0=Small 1=Medium 2=Large — giống Pointer Size trên TV.
+    /// 0=Small 1=Medium 2=Large — matches Pointer Size on TV.
     @Published var pointerSizePreset: Int = 1 {
         didSet {
             if !loadingPrefs {
@@ -45,7 +45,7 @@ final class AppModel: ObservableObject {
             }
         }
     }
-    /// Scroll đảo chiều kiểu macOS Natural Scrolling (tắt = hướng Windows).
+    /// macOS Natural Scrolling direction (off = Windows direction).
     @Published var nativeScroll = true {
         didSet {
             if !loadingPrefs {
@@ -83,10 +83,10 @@ final class AppModel: ObservableObject {
     private var lastPersistedMapEnabled = false
     private var lastPersistedMouseMode = false
 
-    /// Tên đang chờ Learn (hiển thị UI) — rỗng nếu Learn không đặt tên.
+    /// Label pending Learn (shown in UI) — empty if Learn has no label.
     var learnPromptLabel: String { pendingLearnLabel }
 
-    /// Tên hiển thị cho code (từ keyMaps, không fallback cứng trước custom).
+    /// Display name for code (from keyMaps, no hard fallback before custom).
     func displayName(for code: UInt16) -> String {
         keyMaps.first { $0.buttonCode == code }?.buttonName ?? KeyMapRow.name(for: code)
     }
@@ -108,7 +108,7 @@ final class AppModel: ObservableObject {
         }
         mapper.updateMaps(keyMaps)
         mapper.onRemotePointerActivity = { [weak self] in
-            /* Đánh dấu sync trước — tránh race CGEvent → monitor ẩn overlay. */
+            /* Mark sync first — avoid race where CGEvent → monitor hides overlay. */
             self?.pointerOverlay.markRemoteDriving()
             DispatchQueue.main.async { self?.pointerOverlay.noteRemoteActivity() }
         }
@@ -119,7 +119,7 @@ final class AppModel: ObservableObject {
             self?.savePrefs()
         }
         let mapperRef = mapper
-        host.onInputPacket = { packet in
+        host.inputSink.setHandler { packet in
             mapperRef.handle(packet)
         }
         mapper.onLog = { [weak host] level, msg in
@@ -128,7 +128,7 @@ final class AppModel: ObservableObject {
             }
         }
         mapper.refreshTrust()
-        /* Khôi phục Map / Mouse mode sau loadPrefs. */
+        /* Restore Map / Mouse mode after loadPrefs. */
         if savedMapEnabled {
             mapper.setEnabled(true)
         }
@@ -141,7 +141,7 @@ final class AppModel: ObservableObject {
             .sink { [weak self] phase in
                 guard let self else { return }
                 if phase == .ready {
-                    /* Retry: CMD cần encryption — pair có thể xong sau notify. */
+                    /* Retry: CMD requires encryption — pairing may finish after notify. */
                     self.pushAirmouseWithRetry(attemptsLeft: 4)
                     self.savePrefs()
                 } else {
@@ -189,7 +189,7 @@ final class AppModel: ObservableObject {
         threshold = 280
         softDead = 28
         pushAirmouseNow()
-        host.log(.ok, "Airmouse reset mặc định")
+        host.log(.ok, "Airmouse reset to defaults")
     }
 
     private func schedulePushAirmouse() {
@@ -218,7 +218,7 @@ final class AppModel: ObservableObject {
                 lastButtonName = "Released"
             }
         }
-        /* Motion/button đã inject qua onInputPacket trên BLE queue. */
+        /* Motion/button already injected via inputSink on BLE queue. */
     }
 
     func appendHint(_ msg: String) {
@@ -231,8 +231,8 @@ final class AppModel: ObservableObject {
         pendingLearnAssign = nil
         pendingLearnLabel = label
         host.log(.info, label.isEmpty
-                 ? "Learn: bấm 1 nút trên remote (Cancel hoặc chờ 20s)…"
-                 : "Learn «\(label)»: bấm đúng nút trên remote (Cancel hoặc chờ 20s)…")
+                 ? "Learn: press a button on the remote (Cancel or wait 20s)…"
+                 : "Learn «\(label)»: press that button on the remote (Cancel or wait 20s)…")
         learnTimeout = Just(())
             .delay(for: .seconds(20), scheduler: RunLoop.main)
             .sink { [weak self] in
@@ -248,8 +248,8 @@ final class AppModel: ObservableObject {
         let label = pendingLearnLabel
         pendingLearnLabel = ""
         host.log(.info, timedOut
-                 ? "Learn timeout — đã hủy\(label.isEmpty ? "" : " «\(label)»")"
-                 : "Learn đã hủy\(label.isEmpty ? "" : " «\(label)»")")
+                 ? "Learn timeout — cancelled\(label.isEmpty ? "" : " «\(label)»")"
+                 : "Learn cancelled\(label.isEmpty ? "" : " «\(label)»")")
     }
 
     private func finishLearn(code: UInt16) {
@@ -274,7 +274,7 @@ final class AppModel: ObservableObject {
         }
         lastButtonCode = code
         lastButtonName = name
-        host.log(.ok, "Learned \(name) 0x\(String(format: "%04X", code)) — chọn preset")
+        host.log(.ok, "Learned \(name) 0x\(String(format: "%04X", code)) — choose a preset")
         mapper.updateMaps(keyMaps)
         savePrefs()
     }
@@ -287,7 +287,7 @@ final class AppModel: ObservableObject {
             keyMaps.sort { $0.buttonCode < $1.buttonCode }
         }
         let preset = HIDKeyPresets.matching(mod: row.mod, key: row.key)
-        host.log(.ok, "Map \(row.buttonName) → \(row.enabled ? preset.label : "Tắt")")
+        host.log(.ok, "Map \(row.buttonName) → \(row.enabled ? preset.label : "Off")")
         mapper.updateMaps(keyMaps)
         savePrefs()
     }
@@ -309,7 +309,7 @@ final class AppModel: ObservableObject {
         keyMaps = KeyMapRow.defaults
         mapper.updateMaps(keyMaps)
         savePrefs()
-        host.log(.ok, "Map reset theo bảng MR25GA")
+        host.log(.ok, "Map reset to MR25GA defaults")
     }
 
     func ensureMapRow(code: UInt16, name: String) {
@@ -326,16 +326,16 @@ final class AppModel: ObservableObject {
         savePrefs()
     }
 
-    /// Đồng bộ tên + thêm nút mới từ bảng defaults (giữ map user đã gán).
+    /// Sync names and add new buttons from defaults (keep user-assigned maps).
     private func mergeDefaultKeyMapRows() {
         var byCode = Dictionary(uniqueKeysWithValues: keyMaps.map { ($0.buttonCode, $0) })
         for def in KeyMapRow.defaults {
             if var existing = byCode[def.buttonCode] {
                 existing.buttonName = def.buttonName
-                /* Sửa Vol± nếu map cũ gắn nhầm media key. */
+                /* Fix Vol± if old map used wrong media key. */
                 if def.buttonCode == 0x8002, existing.key == 0xF2 { existing.key = 0xF1 }
                 if def.buttonCode == 0x8003, existing.key == 0xF1 { existing.key = 0xF2 }
-                /* AI mặc định Siri nếu chưa gán. */
+                /* Default AI to Siri if not assigned. */
                 if def.buttonCode == 0x808B, existing.key == 0 {
                     existing.key = HIDKeyPresets.siriKey
                     existing.enabled = true

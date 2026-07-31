@@ -53,10 +53,10 @@ static bool s_need_secure;
 static int64_t s_connect_ms;
 static int64_t s_reconnect_delay_ms = 400;
 static int s_enc_fail_streak;
-/** Bump mỗi connect/disconnect — callback discovery cũ bị bỏ. */
+/** Incremented on each connect/disconnect — stale discovery callbacks are ignored. */
 static uint32_t s_conn_gen;
 static uint32_t s_disc_gen;
-/** Deferred NVS — không commit flash trong BLE callback. */
+/** Deferred NVS — do not commit flash inside BLE callback. */
 static bool s_nvs_dirty;
 static ble_addr_t s_nvs_addr;
 
@@ -162,7 +162,7 @@ static void save_cache(void) {
   save_cache_addr_deferred(&s_target);
 }
 
-/** Sau ENC OK — ưu tiên identity addr (ổn định hơn RPA scan). */
+/** After ENC OK — prefer identity addr (more stable than RPA scan). */
 static void remember_bonded_peer(uint16_t conn) {
   struct ble_gap_conn_desc d;
   if (ble_gap_conn_find(conn, &d) != 0) return;
@@ -193,7 +193,7 @@ static bool name_is_remote(const uint8_t *name, uint8_t name_len) {
   uint8_t n = name_len < sizeof(buf) - 1 ? name_len : (uint8_t)(sizeof(buf) - 1);
   memcpy(buf, name, n);
   buf[n] = 0;
-  /* Exact or contains — ADV đôi khi chỉ có short name. */
+  /* Exact or contains — ADV may only have short name. */
   if (strcmp(buf, REMOTE_NAME) == 0) return true;
   if (strstr(buf, "MR25GA") != NULL) return true;
   if (strstr(buf, "LGE MR") != NULL) return true;
@@ -547,7 +547,7 @@ static int gap_event(struct ble_gap_event *event, void *arg) {
         set_state(REM_ENCRYPTED);
         s_secure_deadline_ms = now_ms() + 12000;
         smp_for_remote();
-        /* Bonded reconnect: đã encrypt → discover ngay, không pair lại. */
+        /* Bonded reconnect: already encrypted → discover immediately, no re-pair. */
         if (desc.sec_state.encrypted) {
           ESP_LOGI(TAG, "already bonded/encrypted");
           s_need_secure = false;
@@ -580,8 +580,8 @@ static int gap_event(struct ble_gap_event *event, void *arg) {
       ESP_LOGI(TAG, "ENC status=%d (0=ok)", event->enc_change.status);
       if (event->enc_change.status != 0) {
         s_enc_fail_streak++;
-        ESP_LOGW(TAG, "ENC fail streak=%d — KHÔNG xóa bond ngay", s_enc_fail_streak);
-        /* Chỉ xóa bond sau nhiều lần fail — remote hay gửi Pairing Request lại. */
+        ESP_LOGW(TAG, "ENC fail streak=%d — NOT deleting bond yet", s_enc_fail_streak);
+        /* Delete bond only after many failures — remote often resends Pairing Request. */
         if (s_enc_fail_streak >= 3) {
           struct ble_gap_conn_desc desc;
           if (ble_gap_conn_find(s_conn, &desc) == 0) {
@@ -637,10 +637,10 @@ static int gap_event(struct ble_gap_event *event, void *arg) {
     }
     case BLE_GAP_EVENT_REPEAT_PAIRING: {
       /*
-       * LG remote thường gửi Pairing Request mỗi lần connect dù đã bond.
-       * RETRY + delete_peer → mất bond mỗi lần. IGNORE = giữ LTK, encrypt lại.
+       * LG remote often sends Pairing Request on every connect even when bonded.
+       * RETRY + delete_peer → loses bond each time. IGNORE = keep LTK, re-encrypt.
        */
-      ESP_LOGI(TAG, "REPEAT_PAIRING — IGNORE (giữ bond NVS)");
+      ESP_LOGI(TAG, "REPEAT_PAIRING — IGNORE (keep NVS bond)");
       return BLE_GAP_REPEAT_PAIRING_IGNORE;
     }
     default:
@@ -656,7 +656,7 @@ static void start_scan_burst(void) {
   s_scan_ms = now_ms();
 
   ESP_LOGI(TAG, "SCAN burst %dms \"%s\"%s", SCAN_BURST_MS, REMOTE_NAME,
-           s_paired ? " (reconnect — bấm nút remote)" : "");
+           s_paired ? " (reconnect — press remote button)" : "");
   int rc = ble_core_do_scan_start(s_own_addr_type, SCAN_BURST_MS, gap_event);
   if (rc != 0) {
     ESP_LOGW(TAG, "SCAN start fail %d", rc);
@@ -681,13 +681,13 @@ static void try_connect(void) {
   }
 }
 
-/** Thử connect thẳng identity đã lưu — bỏ scan nếu remote còn trong range / đang ADV. */
+/** Try direct connect to cached identity — skip scan if remote is in range / ADV. */
 static void try_cached_reconnect(void) {
   if (!s_paired || !s_have_cached_addr) {
     start_scan_burst();
     return;
   }
-  ESP_LOGI(TAG, "cached reconnect (bấm nút remote nếu không thấy)");
+  ESP_LOGI(TAG, "cached reconnect (press remote button if not seen)");
   s_got_target = false;
   s_do_connect = false;
   try_connect();
@@ -715,7 +715,7 @@ void remote_manager_tick(void) {
 
   if (!mac_gatt_mac_ready()) {
     if (bridge_state_remote() == REM_READY) {
-      /* Giữ link remote khi đóng app — mở lại không pair lại. */
+      /* Keep remote link when app closes — reopen without re-pair. */
       return;
     }
     if (bridge_state_remote() == REM_SCANNING) {
@@ -728,7 +728,7 @@ void remote_manager_tick(void) {
       set_state(REM_WAIT_MAC);
     }
     if (bridge_state_remote() == REM_WAIT_MAC || bridge_state_remote() == REM_IDLE) return;
-    /* Connecting/Secure/Discover: để chạy tiếp, không cắt. */
+    /* Connecting/Secure/Discover: let run, do not cut. */
   }
 
   if (bridge_state_remote() == REM_WAIT_MAC) {
@@ -786,7 +786,7 @@ void remote_manager_tick(void) {
   if (bridge_state_remote() == REM_RECOVERING) {
     if (!mac_gatt_mac_ready()) return;
     if (now_ms() - s_state_ms > s_reconnect_delay_ms) {
-      /* Lần 1: cached; lần sau scan (RPA có thể đổi). */
+      /* Round 1: cached; later scan (RPA may change). */
       static int s_re_n;
       bridge_metrics()->reconnect_count++;
       if (s_paired && s_have_cached_addr && (s_re_n++ % 2) == 0)

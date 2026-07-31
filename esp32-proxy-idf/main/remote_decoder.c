@@ -23,7 +23,7 @@ struct remote_decoder {
 static const int kBiasWarmup = 60;
 static const double kLpf = 0.42;
 static const double kStill = 70.0;
-/* ~80ms đứng yên (FD ~100Hz) mới xóa fractional carry. */
+/* ~80ms still (FD ~100Hz) before clearing fractional carry. */
 static const int kStillClearSamples = 8;
 
 remote_decoder_t *remote_decoder_create(void) {
@@ -57,7 +57,7 @@ void remote_decoder_set_sens(remote_decoder_t *d, float s, float thresh, float d
 }
 
 static double soft_axis(const remote_decoder_t *d, double v) {
-  /* Soft knee giống hid-dongle — mượt hơn excess². */
+  /* Soft knee like hid-dongle — smoother than excess². */
   double a = fabs(v);
   if (a <= d->soft_dead) return 0;
   double s = (a - d->soft_dead) / (a + d->soft_dead);
@@ -87,8 +87,8 @@ void remote_decoder_on_fd(remote_decoder_t *d, const uint8_t *p, size_t len) {
     imu[i] = (int16_t)raw;
   }
   double gx = imu[0], gy = imu[1], gz = imu[2];
-  /* Layout FD (đúng như esp32-hid-dongle / ProtocolAnalyzer):
-   * p[16..17]=button BE, p[18]=wheel — KHÔNG phải p[16]=wheel. */
+  /* FD layout (matches esp32-hid-dongle / ProtocolAnalyzer):
+   * p[16..17]=button BE, p[18]=wheel — NOT p[16]=wheel. */
   uint16_t btn = ((uint16_t)p[16] << 8) | p[17];
   int8_t wheel = (int8_t)p[18];
 
@@ -110,7 +110,7 @@ void remote_decoder_on_fd(remote_decoder_t *d, const uint8_t *p, size_t len) {
     double cx = gx - d->gyro_bias[0];
     double cy = gy - d->gyro_bias[1];
     double cz = gz - d->gyro_bias[2];
-    /* Bias nhẹ khi đứng yên (giống Studio) — tránh “hút” khi rê chậm. */
+    /* Light bias when still (like Studio) — avoids "snap" on slow drags. */
     if (fabs(cx) < kStill && fabs(cz) < kStill) {
       const double b = 0.0015;
       d->gyro_bias[0] = (1 - b) * d->gyro_bias[0] + b * gx;
@@ -130,7 +130,7 @@ void remote_decoder_on_fd(remote_decoder_t *d, const uint8_t *p, size_t len) {
       d->pointer_mode = true;
 
     if (sx == 0.0 && sy == 0.0) {
-      /* Giữ fractional carry khi qua deadzone ngắn; chỉ clear sau ~80ms đứng yên. */
+      /* Keep fractional carry through short deadzone; clear only after ~80ms still. */
       d->still_samples++;
       if (d->still_samples >= kStillClearSamples) {
         d->carry_x = d->carry_y = 0;
@@ -154,7 +154,7 @@ void remote_decoder_on_fd(remote_decoder_t *d, const uint8_t *p, size_t len) {
     }
   }
 
-  /* Wheel: kênh riêng — không chung accumulator với cursor. */
+  /* Wheel: separate channel — not shared accumulator with cursor. */
   if (wheel != 0) {
     pub_wheel(wheel);
   }

@@ -103,7 +103,7 @@ void ble_core_flush_tx(void);
 uint32_t ble_core_tx_gen(void);
 void ble_core_release_pressed_buttons(void);
 
-/** Sync ops — chỉ BleCoreTask. */
+/** Sync ops — BleCoreTask only. */
 int ble_core_do_scan_cancel(void);
 int ble_core_do_scan_start(uint8_t own_addr_type, uint32_t duration_ms, ble_gap_event_fn *cb);
 int ble_core_do_connect(uint8_t own_addr_type, const ble_addr_t *addr, ble_gap_event_fn *cb);

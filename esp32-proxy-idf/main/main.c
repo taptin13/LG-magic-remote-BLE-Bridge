@@ -1,8 +1,8 @@
 /**
- * MR-Proxy — ESP-IDF + NimBLE (không dùng Arduino BLEDevice)
+ * MR-Proxy — ESP-IDF + NimBLE (no Arduino BLEDevice)
  *
  * LG Remote ← Central — ESP32 — Peripheral → Mac (Custom GATT)
- * BleCoreTask = sole GAP/Event-notify owner; remote_manager_tick chạy trên BleCore.
+ * BleCoreTask = sole GAP/Event-notify owner; remote_manager_tick runs on BleCore.
  */
 
 #include "config.h"
@@ -77,7 +77,7 @@ static void on_reset(int reason) {
 
 static void on_sync(void) {
   ESP_LOGI(TAG, "NimBLE synced");
-  /* KHÔNG ble_store_clear() — giữ bond remote giữa các lần reboot/app reconnect. */
+  /* Do NOT ble_store_clear() — keep remote bond across reboot/app reconnect. */
   ble_hs_cfg.sm_io_cap = BLE_SM_IO_CAP_NO_IO;
   ble_hs_cfg.sm_bonding = 1;
   ble_hs_cfg.sm_mitm = 0;

@@ -1,6 +1,6 @@
 # MR-Proxy (ESP-IDF + NimBLE)
 
-Không dùng Arduino `BLEDevice.h`. Stack: **ESP-IDF → NimBLE**, dual-role.
+Does not use Arduino `BLEDevice.h`. Stack: **ESP-IDF → NimBLE**, dual-role.
 
 ```
 LG Remote (Peripheral) ← Central — ESP32 — Peripheral → Mac (Custom GATT)
@@ -16,26 +16,26 @@ pio run -t upload
 pio device monitor -b 115200
 ```
 
-Cần [PlatformIO](https://platformio.org/) (`pio`). Lần đầu tải ESP-IDF + toolchain.
+Requires [PlatformIO](https://platformio.org/) (`pio`). First run downloads ESP-IDF + toolchain.
 
-## Luồng boot
+## Boot flow
 
-1. ADV tên **`MR-Proxy`**
-2. Mac connect → ESP yêu cầu bond (Just Works) → encrypted link
+1. ADV name **`MR-Proxy`**
+2. Mac connect → ESP requests bond (Just Works) → encrypted link
 3. Mac subscribe Event → ready → SCAN burst `LGE MR25GA`
 4. Pair/bond remote → HID FD → Event Bus → GATT notify Mac
 
-Command write cần encryption. Sau reflash: quên `MR-Proxy` trên Mac nếu bond lệch.
+Command write requires encryption. After reflash: forget `MR-Proxy` on Mac if bond is stale.
 
 ## Module (`main/`)
 
-| File | Vai trò |
-|------|---------|
+| File | Role |
+|------|------|
 | `main.c` | Boot, NimBLE, Command `0x01`/`0x02` |
-| `mac_gatt.c` | Peripheral — service proxy |
-| `remote_manager.c` | Central — state machine remote |
+| `mac_gatt.c` | Peripheral — proxy service |
+| `remote_manager.c` | Central — remote state machine |
 | `remote_decoder.c` | FD → motion / wheel / button |
 | `event_bus.c` | FreeRTOS queue |
 | `mac_bridge.c` | Bus → notify Mac |
 
-UUID / packet / mã phím: [PROTOCOL.md](../PROTOCOL.md) · kiến trúc: [ARCHITECTURE.md](../ARCHITECTURE.md).
+UUID / packet / key codes: [PROTOCOL.md](../PROTOCOL.md) · architecture: [ARCHITECTURE.md](../ARCHITECTURE.md).

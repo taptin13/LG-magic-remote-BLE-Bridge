@@ -39,7 +39,7 @@ struct KeyMapRow: Identifiable, Codable, Equatable {
     var key: UInt8
     var enabled: Bool
 
-    /// Bảng MR25GA — Code / Maps to.
+    /// MR25GA table — Code / Maps to.
     static let defaults: [KeyMapRow] = [
         .init(buttonCode: 0x8000, buttonName: "Ch+", mod: 0, key: 0, enabled: false),
         .init(buttonCode: 0x8001, buttonName: "Ch-", mod: 0, key: 0, enabled: false),
@@ -95,7 +95,7 @@ enum HIDKeyPresets: String, CaseIterable, Identifiable {
     case siri, mouseToggle
     case a, b, c, none
 
-    /// Pseudo HID — không trùng usage thật.
+    /// Pseudo HID — does not conflict with real usage.
     static let siriKey: UInt8 = 0xFE
     static let mouseToggleKey: UInt8 = 0xFD
 
@@ -126,7 +126,7 @@ enum HIDKeyPresets: String, CaseIterable, Identifiable {
         case .a: return "A"
         case .b: return "B"
         case .c: return "C"
-        case .none: return "Tắt"
+        case .none: return "Off"
         }
     }
 

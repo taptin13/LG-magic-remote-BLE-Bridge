@@ -58,7 +58,7 @@ static uint32_t s_tx_gen = 1;
 
 static uint16_t s_pressed[PRESSED_MAX];
 static int s_pressed_n;
-/** Release đã quyết định gửi nhưng chưa vào TX queue — retry đến khi enqueue được. */
+/** Release decided to send but not yet in TX queue — retry until enqueued. */
 static uint16_t s_pending_rel[PRESSED_MAX];
 static int s_pending_rel_n;
 
@@ -243,7 +243,7 @@ static void note_button_locked(const bridge_packet_t *pkt) {
     pressed_remove(pkt->u.button.code);
 }
 
-/** Caller holds s_tx_mu. Đẩy pending releases vào TX; không bỏ code nếu enqueue fail. */
+/** Caller holds s_tx_mu. Push pending releases into TX; do not drop code if enqueue fails. */
 static void flush_pending_releases_locked(void) {
   while (s_pending_rel_n > 0) {
     uint16_t code = s_pending_rel[0];
@@ -260,16 +260,16 @@ static void flush_pending_releases_locked(void) {
       continue;
     }
 
-    /* Queue đầy — bỏ item cũ (không phải release) để nhường chỗ. */
+    /* Queue full — drop old item (not a release) to make room. */
     ble_tx_item_t discarded;
     bool enqueued = false;
     while (xQueueReceive(s_tx_q, &discarded, 0) == pdTRUE) {
       if (discarded.pkt.type == PKT_BUTTON && discarded.pkt.u.button.down == 0) {
-        /* Giữ release khác trong pending nếu chưa có. */
+        /* Keep other release in pending if not already there. */
         pending_rel_add(discarded.pkt.u.button.code);
       } else if (discarded.pkt.type == PKT_BUTTON && discarded.pkt.u.button.down) {
         bridge_metrics()->tx_drop_button++;
-        pending_rel_add(discarded.pkt.u.button.code); /* down mất → cần release */
+        pending_rel_add(discarded.pkt.u.button.code); /* lost down → need release */
       } else if (discarded.pkt.type == PKT_MOTION) {
         bridge_metrics()->tx_drop_motion++;
       } else {
@@ -283,7 +283,7 @@ static void flush_pending_releases_locked(void) {
         break;
       }
     }
-    if (!enqueued) break; /* vẫn đầy / rỗng bất thường — retry vòng sau */
+    if (!enqueued) break; /* still full / abnormal empty — retry next round */
   }
 }
 
@@ -304,7 +304,7 @@ void ble_core_flush_tx(void) {
   s_motion_pend = false;
   if (s_tx_q) xQueueReset(s_tx_q);
   s_pressed_n = 0;
-  s_pending_rel_n = 0; /* Mac disconnect — không notify được */
+  s_pending_rel_n = 0; /* Mac disconnect — cannot notify */
   xSemaphoreGive(s_tx_mu);
 }
 
@@ -351,7 +351,7 @@ bool ble_core_submit_packet(const bridge_packet_t *pkt) {
     xSemaphoreGive(s_tx_mu);
     return false;
   }
-  /* Button-up: cũng đưa vào pending nếu queue đầy — không mất release. */
+  /* Button-up: also queue as pending if full — do not lose release. */
   if (pkt->type == PKT_BUTTON && !pkt->u.button.down) {
     ble_tx_item_t it = {.pkt = *pkt, .gen = gen, .attempts = 0};
     if (xQueueSend(s_tx_q, &it, 0) != pdTRUE) {
@@ -397,7 +397,7 @@ bool ble_core_submit_packet(const bridge_packet_t *pkt) {
   }
   if (pkt->type == PKT_BUTTON && pkt->u.button.down) {
     pressed_remove(pkt->u.button.code);
-    pending_rel_add(pkt->u.button.code); /* down không vào queue → cần release path */
+    pending_rel_add(pkt->u.button.code); /* down not queued → need release path */
   }
   flush_pending_releases_locked();
   xSemaphoreGive(s_tx_mu);

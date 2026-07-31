@@ -16,7 +16,7 @@ static int32_t s_mx, s_my;
 static uint16_t s_mbtn;
 static bool s_mpend;
 
-/* Wheel tách khỏi motion — scroll không làm trễ/coalesce cursor. */
+/* Wheel separate from motion — scroll does not delay/coalesce cursor. */
 static portMUX_TYPE s_wheel_mux = portMUX_INITIALIZER_UNLOCKED;
 static int32_t s_mwheel;
 static bool s_wpend;
@@ -73,7 +73,7 @@ bool event_bus_publish_wheel(int8_t wheel) {
 bool event_bus_take_motion(motion_payload_t *out) {
   if (!out) return false;
 
-  /* Ưu tiên cursor; wheel lấy riêng ở lần take sau. */
+  /* Prefer cursor; wheel taken separately on next take. */
   portENTER_CRITICAL(&s_motion_mux);
   if (s_mpend) {
     int32_t dx = s_mx, dy = s_my;
@@ -112,7 +112,7 @@ bool event_bus_take_motion(motion_payload_t *out) {
 }
 
 void event_bus_requeue_motion(int16_t dx, int16_t dy, uint16_t buttons, int8_t wheel) {
-  /* Motion fail → drop dx/dy (latency). Chỉ giữ wheel trên kênh riêng. */
+  /* Motion fail → drop dx/dy (latency). Keep wheel only on separate channel. */
   (void)dx;
   (void)dy;
   (void)buttons;

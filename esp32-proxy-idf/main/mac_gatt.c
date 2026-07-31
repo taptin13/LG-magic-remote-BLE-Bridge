@@ -138,7 +138,7 @@ static void on_subscribe(uint16_t conn_handle, uint16_t attr_handle, uint8_t cur
   if (attr_handle == s_evt_val_handle) {
     s_subscribed = (cur & 1) != 0;
     ESP_LOGI(TAG, "Event CCCD=%d", (int)s_subscribed);
-    /* Không downgrade nếu đã MacReady (ENC+sub có thể đến trước dòng set này). */
+    /* Do not downgrade if already MacReady (ENC+sub may arrive before this set line). */
     if (s_subscribed && bridge_state_mac() < MAC_READY)
       bridge_state_set_mac(MAC_EVENT_SUBSCRIBED);
     refresh_ready();
@@ -220,7 +220,7 @@ static int gap_event(struct ble_gap_event *event, void *arg) {
       s_link_gen++;
       bridge_session_bump_mac();
       bridge_state_set_mac(MAC_ADV);
-      /* Mac gone — flush TX + clear pressed (không notify được). */
+      /* Mac gone — flush TX + clear pressed (cannot notify). */
       ble_core_cmd_flush_tx();
       mac_gatt_set_status(ST_WAIT_MAC);
       ble_core_cmd_adv_start();
@@ -272,7 +272,7 @@ void mac_gatt_init(mac_cmd_cb_t cmd_cb) {
     return;
   }
   ble_hs_cfg.sm_io_cap = BLE_SM_IO_CAP_NO_IO;
-  /* Legacy JW cho remote LG; Mac dùng Just Works bond (không MITM PIN). */
+  /* Legacy JW for LG remote; Mac uses Just Works bond (no MITM PIN). */
   ble_hs_cfg.sm_bonding = 1;
   ble_hs_cfg.sm_sc = 0;
   ble_hs_cfg.sm_mitm = 0;

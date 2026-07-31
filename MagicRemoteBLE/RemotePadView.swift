@@ -1,20 +1,39 @@
 import SwiftUI
 import AppKit
 
-/// Layout MR25GA — dùng màu hệ thống (Apple HIG), không hard-code dark theme.
+/// MR25GA layout — colors inverted vs the app appearance (light app → dark pad, and vice versa).
 struct RemotePadView: View {
     @EnvironmentObject var model: AppModel
+    @Environment(\.colorScheme) private var appColorScheme
     @Binding var selectedCode: UInt16?
     @Binding var selectedLabel: String
 
-    private var shell: Color { Color(nsColor: .controlBackgroundColor) }
-    private var face: Color { Color(nsColor: .windowBackgroundColor) }
-    private var stroke: Color { Color(nsColor: .separatorColor) }
+    /// Pad uses the opposite of the app/window color scheme.
+    private var padDark: Bool { appColorScheme == .light }
+
+    private var shell: Color {
+        padDark ? Color(red: 0.13, green: 0.13, blue: 0.14) : Color(red: 0.93, green: 0.93, blue: 0.94)
+    }
+    private var face: Color {
+        padDark ? Color(red: 0.18, green: 0.18, blue: 0.19) : Color(red: 0.98, green: 0.98, blue: 0.99)
+    }
+    private var stroke: Color {
+        padDark ? Color.white.opacity(0.16) : Color.black.opacity(0.12)
+    }
+    private var btnBase: Color {
+        padDark ? Color(red: 0.24, green: 0.24, blue: 0.25) : Color(red: 0.88, green: 0.88, blue: 0.89)
+    }
+    private var labelPrimary: Color {
+        padDark ? Color.white.opacity(0.92) : Color.black.opacity(0.85)
+    }
+    private var labelSecondary: Color {
+        padDark ? Color.white.opacity(0.45) : Color.black.opacity(0.45)
+    }
 
     var body: some View {
         VStack(spacing: 10) {
             HStack {
-                /* Power — trang trí pad, không Learn / không BLE. */
+                /* Power — decorative on pad, no Learn / no BLE. */
                 decorativeBtn("Power", w: 44, h: 36, accent: .red)
                 Spacer()
                 padBtn("Help", code: 0x8029, w: 44, h: 36)
@@ -60,14 +79,14 @@ struct RemotePadView: View {
                 VStack(spacing: 4) {
                     Text("VOL")
                         .font(.caption2.weight(.semibold))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(labelSecondary)
                     padBtn("+", code: 0x8002, label: "Vol+", w: 88, h: 36)
                     padBtn("−", code: 0x8003, label: "Vol-", w: 88, h: 36)
                 }
                 VStack(spacing: 4) {
                     Text("CH")
                         .font(.caption2.weight(.semibold))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(labelSecondary)
                     padBtn("∧", code: 0x8000, label: "Ch+", w: 88, h: 36)
                     padBtn("∨", code: 0x8001, label: "Ch-", w: 88, h: 36)
                 }
@@ -96,8 +115,9 @@ struct RemotePadView: View {
         )
         .overlay(
             RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .strokeBorder(stroke.opacity(0.6), lineWidth: 1)
+                .strokeBorder(stroke.opacity(0.85), lineWidth: 1)
         )
+        .environment(\.colorScheme, padDark ? .dark : .light)
     }
 
     private func padBtn(
@@ -160,7 +180,7 @@ struct RemotePadView: View {
             }
             Text(title)
                 .font(.system(size: title.count > 6 ? 10 : (round ? 13 : 11), weight: .semibold))
-                .foregroundStyle(accent != nil ? Color.white : Color.primary)
+                .foregroundStyle(accent != nil ? Color.white : labelPrimary)
                 .lineLimit(1)
                 .minimumScaleFactor(0.7)
         }
@@ -178,15 +198,15 @@ struct RemotePadView: View {
     }
 
     private func border(selected: Bool) -> Color {
-        selected ? Color.accentColor : stroke.opacity(0.8)
+        selected ? Color.accentColor : stroke.opacity(0.9)
     }
 
     private func btnFill(live: Bool, selected: Bool, mapped: Bool, accent: Color?) -> Color {
         if let accent { return accent }
-        if live { return Color.green.opacity(0.35) }
-        if selected { return Color.accentColor.opacity(0.22) }
-        if mapped { return Color.accentColor.opacity(0.10) }
-        return Color(nsColor: .controlColor)
+        if live { return Color.green.opacity(padDark ? 0.40 : 0.32) }
+        if selected { return Color.accentColor.opacity(padDark ? 0.32 : 0.22) }
+        if mapped { return Color.accentColor.opacity(padDark ? 0.18 : 0.12) }
+        return btnBase
     }
 
     private func helpText(name: String, code: UInt16) -> String {

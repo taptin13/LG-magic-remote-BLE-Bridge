@@ -12,12 +12,12 @@ Remote target: **`LGE MR25GA`**
 | Status notify/read | `6D520003-4D52-3235-4741-425249444745` |
 | Command write | `6D520012-4D52-3235-4741-425249444745` |
 
-(Mac còn giữ UUID HID legacy `6D520002-…` — không dùng trên stack hiện tại.)
+(The Mac app still knows legacy HID UUID `6D520002-…` — unused on the current stack.)
 
 ## Event packet (`bridge_packet_t`, little-endian)
 
 ```
-[0]     type   1=Motion 2=Button 3=Battery 4=Status  (5=Voice — reserved Mac)
+[0]     type   1=Motion 2=Button 3=Battery 4=Status  (5=Voice — reserved on Mac)
 [1]     seq
 [2..]   payload
 ```
@@ -28,16 +28,16 @@ Remote target: **`LGE MR25GA`**
 |-------:|-------|
 | 2–3 | `int16 dx` |
 | 4–5 | `int16 dy` |
-| 6–7 | `uint16 buttons` (bit0=L bit1=R — hiện ESP gửi 0; click qua type=2) |
-| 8 | `int8 wheel` (optional; frame chỉ scroll có thể dx=dy=0) |
+| 6–7 | `uint16 buttons` (bit0=L bit1=R — ESP currently sends 0; clicks use type=2) |
+| 8 | `int8 wheel` (optional; scroll-only frames may have dx=dy=0) |
 
 ### Button (type=2)
 
-`uint16 code` (BE trên wire LG, LE trong packet bridge), `uint8 down`
+`uint16 code` (BE on LG wire, LE in bridge packet), `uint8 down`
 
 ### Battery / Status
 
-`uint8` tại offset 2.
+`uint8` at offset 2.
 
 ## Status byte
 
@@ -54,35 +54,35 @@ Remote target: **`LGE MR25GA`**
 
 | Byte0 | Payload | Meaning |
 |------:|---------|---------|
-| `0x01` | — | Reset / recalib gyro bias |
-| `0x02` | 3× `float32` LE: sens, thresh, softDead | Đặt độ nhạy airmouse |
+| `0x01` | — | Reset / recalibrate gyro bias |
+| `0x02` | 3× `float32` LE: sens, thresh, softDead | Set air-mouse sensitivity |
 
-Mặc định decoder: sens `0.045`, thresh `280`, softDead `28`.
+Decoder defaults: sens `0.045`, thresh `280`, softDead `28`.
 
 ## Flow
 
-1. Mac Connect `MR-Proxy` + **bond (Just Works)** + subscribe Event  
-2. ESP chỉ coi Mac **ready** khi Event CCCD bật **và** link đã encrypted  
-3. SCAN `LGE MR25GA` (bấm nút remote nếu cần)  
+1. Mac connects to `MR-Proxy` + **bond (Just Works)** + subscribe Event  
+2. ESP treats Mac as **ready** only when Event CCCD is on **and** the link is encrypted  
+3. SCAN `LGE MR25GA` (press a remote button if needed)  
 4. Event stream → Mac `InputMapper` → CGEvent  
 
 ## Security (Mac ↔ ESP32)
 
-| Thành phần | Bảo vệ |
-|------------|--------|
-| Command write | GATT `WRITE_ENC` + kiểm tra `sec_state.encrypted` trong callback |
-| Ready / scan remote | Chỉ sau subscribe **và** encryption |
-| Event / Status notify | Gửi trên link đã pair (Just Works, không MITM PIN) |
+| Component | Protection |
+|-----------|------------|
+| Command write | GATT `WRITE_ENC` + `sec_state.encrypted` check in callback |
+| Ready / scan remote | Only after subscribe **and** encryption |
+| Event / Status notify | Sent on a paired link (Just Works, no MITM PIN) |
 
-Threat model: ngăn thiết bị BLE lạ ghi CMD / kích hoạt bridge mà không pair.  
-Không chống attacker có physical access / đã pair. Tắt bằng `-DPROXY_REQUIRE_MAC_ENC=0` khi debug.
+Threat model: block a nearby unpaired BLE device from writing CMD / enabling the bridge.  
+Does not stop an attacker with physical access or an already-paired peer. Disable with `-DPROXY_REQUIRE_MAC_ENC=0` for debug.
 
-Sau **reflash ESP**: nếu Mac báo bond lỗi (`Peer removed pairing information`), System Settings → Bluetooth → quên **MR-Proxy**, rồi Connect lại.
+After an **ESP reflash**: if the Mac reports a bond error (`Peer removed pairing information`), System Settings → Bluetooth → Forget **MR-Proxy**, then Connect again.
 
-## Mã phím MR25GA (đã map trong app)
+## MR25GA key codes (mapped in the app)
 
-| Code | Tên | Mặc định map |
-|------|-----|--------------|
+| Code | Name | Default map |
+|------|------|-------------|
 | `0x8002` | Vol+ | Media Vol+ |
 | `0x8003` | Vol- | Media Vol- |
 | `0x8007` / `0x8006` | Left / Right | ← / → |
@@ -90,20 +90,20 @@ Sau **reflash ESP**: nếu Mac báo bond lỗi (`Peer removed pairing informatio
 | `0x80A1` | Input | — |
 | `0x8045` | 123 | — |
 | `0x8028` | Back | Esc (Mouse ON → mouse Back) |
-| `0x8043` | Settings | — (Mouse ON → chuột phải) |
-| `0x8044` | Wheel/OK | Enter (Mouse ON → chuột trái) |
+| `0x8043` | Settings | — (Mouse ON → right click) |
+| `0x8044` | Wheel/OK | Enter (Mouse ON → left click) |
 | `0x80AB` | Guide/List | — |
 | `0x807C` | Home | ⌘H |
 | `0x8029` | Help | — |
 | `0x8056`…`0x800C` | B1–B6 | — |
 | `0x808B` | AI | Siri (`key 0xFE`) |
 
-Preset đặc biệt (không phải HID usage thật):
+Special presets (not real HID usages):
 
-| key | Ý nghĩa |
+| key | Meaning |
 |----:|---------|
-| `0xFE` | Mở Siri |
-| `0xFD` | Bật/tắt mouse mode |
+| `0xFE` | Open Siri |
+| `0xFD` | Toggle mouse mode |
 | `0xF1` / `0xF2` / `0xF3` | Media Vol+ / Vol- / Mute |
 
-Nguồn sự thật: `MagicRemoteBLE/Models.swift`, `esp32-proxy-idf/main/bridge_packet.h`.
+Source of truth: `MagicRemoteBLE/Models.swift`, `esp32-proxy-idf/main/bridge_packet.h`.

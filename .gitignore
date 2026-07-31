@@ -6,7 +6,7 @@ xcuserdata/
 .vscode/
 .idea/
 
-# Legacy / archived trees — không theo dõi
+# Legacy / archived trees — not tracked
 legacy/
 
 # PlatformIO / ESP-IDF

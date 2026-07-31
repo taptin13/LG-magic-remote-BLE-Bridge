@@ -2,8 +2,8 @@ import AppKit
 import CoreGraphics
 import Darwin
 
-/// Con trỏ lớn khi remote điều khiển.
-/// Dùng overlay mũi tên (không chỉ NSCursor) để vẫn hiện trên Dock / YouTube / Chrome.
+/// Large pointer when the remote is driving.
+/// Uses arrow overlay (not just NSCursor) so it stays visible over Dock / YouTube / Chrome.
 final class PointerOverlayController {
     private var panel: NSPanel?
     private var imageView: NSImageView?
@@ -18,16 +18,16 @@ final class PointerOverlayController {
     private var cgHidden = false
     private var cachedArrow: NSImage?
     private var cachedScale: CGFloat = 0
-    private var hotSpot = CGPoint(x: 0, y: 0) // offset tip trong panel (Cocoa: gốc dưới-trái)
+    private var hotSpot = CGPoint(x: 0, y: 0) // tip offset within panel (Cocoa: bottom-left origin)
 
-    /// Timestamp remote (thread-safe) — dùng để phân biệt CGEvent remote vs chuột thật.
+    /// Remote timestamp (thread-safe) — distinguishes remote CGEvent vs physical mouse.
     private let remoteLock = NSLock()
     private var lastRemoteActivityAt: CFAbsoluteTime = 0
-    /// Chuột thật chỉ ẩn overlay khi remote im ≥ ngưỡng này.
+    /// Physical mouse hides overlay only when remote idle ≥ this threshold.
     private static let physicalQuietSec: CFTimeInterval = 0.45
     private static let idleHideSec: CFTimeInterval = 1.0
 
-    /// Hệ số phóng mũi tên.
+    /// Arrow scale factor.
     var size: CGFloat = 2.6 {
         didSet {
             if abs(oldValue - size) > 0.01 {
@@ -49,14 +49,14 @@ final class PointerOverlayController {
         }
     }
 
-    /// Gọi từ bất kỳ queue nào TRƯỚC khi post CGEvent — đánh dấu remote đang lái.
+    /// Call from any queue BEFORE posting CGEvent — marks remote as driving.
     func markRemoteDriving() {
         remoteLock.lock()
         lastRemoteActivityAt = CFAbsoluteTimeGetCurrent()
         remoteLock.unlock()
     }
 
-    /// Hiện overlay (main). Có thể gọi sau markRemoteDriving.
+    /// Show overlay (main). May be called after markRemoteDriving.
     func noteRemoteActivity() {
         guard featureOn else { return }
         markRemoteDriving()
@@ -101,7 +101,7 @@ final class PointerOverlayController {
         idleHideTimer?.invalidate()
         idleHideTimer = Timer.scheduledTimer(withTimeInterval: Self.idleHideSec, repeats: false) { [weak self] _ in
             guard let self else { return }
-            /* Chỉ ẩn nếu remote thật sự im. */
+            /* Hide only if remote is truly idle. */
             if self.secondsSinceRemote() < Self.idleHideSec * 0.85 {
                 self.scheduleIdleHide()
                 return
@@ -128,7 +128,7 @@ final class PointerOverlayController {
         forceHideSystemCursor()
         let loc = NSEvent.mouseLocation
         panel.setFrameOrigin(NSPoint(x: loc.x - hotSpot.x, y: loc.y - hotSpot.y))
-        /* Gia hạn idle khi remote còn đang lái. */
+        /* Extend idle timer while remote is still driving. */
         if secondsSinceRemote() < 0.2 {
             scheduleIdleHide()
         }
@@ -152,7 +152,7 @@ final class PointerOverlayController {
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = false
-        /* Cao hơn Dock / menu / video controls */
+        /* Above Dock / menu / video controls */
         panel.level = NSWindow.Level(rawValue: Int(CGShieldingWindowLevel()) + 1)
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
         panel.ignoresMouseEvents = true
@@ -191,7 +191,7 @@ final class PointerOverlayController {
 
         cachedArrow = img
         cachedScale = scale
-        /* NSCursor.hotSpot: gốc trên-trái ảnh. Panel/Cocoa: gốc dưới-trái → đổi Y. */
+        /* NSCursor.hotSpot: top-left image origin. Panel/Cocoa: bottom-left origin → flip Y. */
         let tipFromTopX = base.hotSpot.x * scale
         let tipFromTopY = base.hotSpot.y * scale
         hotSpot = CGPoint(x: tipFromTopX, y: dstSize.height - tipFromTopY)
@@ -206,7 +206,7 @@ final class PointerOverlayController {
 
     private func installMonitors() {
         guard globalMonitor == nil else { return }
-        /* Chỉ nút/kéo — KHÔNG listen mouseMoved (CGEvent remote cũng phát mouseMoved). */
+        /* Buttons/drag only — do NOT listen to mouseMoved (remote CGEvent also emits mouseMoved). */
         let mask: NSEvent.EventTypeMask = [
             .leftMouseDown, .rightMouseDown, .otherMouseDown,
             .scrollWheel,
@@ -229,32 +229,60 @@ final class PointerOverlayController {
 
     private func onLikelyPhysicalInput() {
         guard featureOn, visuallyShown else { return }
-        /* Remote vừa lái (click/scroll từ remote cũng mark) → bỏ qua. */
+        /* Remote just drove (remote click/scroll also marks) → ignore. */
         if secondsSinceRemote() < Self.physicalQuietSec { return }
         hideVisual()
     }
 
+    /// Best-effort private CGS hook so `NSCursor.hide` works while this app is backgrounded.
+    /// If symbols are missing/ABI-changed, public APIs below still run (overlay remains usable).
+    private var privateCursorAPIProbed = false
+    private var privateCursorAPIAvailable = false
+
     private func enableCursorControlInBackground() {
-        guard !cursorInBgEnabled else { return }
+        if cursorInBgEnabled { return }
+        if !privateCursorAPIProbed {
+            privateCursorAPIProbed = true
+            privateCursorAPIAvailable = probeSetsCursorInBackground()
+            if !privateCursorAPIAvailable {
+                NSLog("PointerOverlay: SetsCursorInBackground unavailable — using NSCursor.hide + CGDisplayHideCursor only")
+            }
+        }
+        guard privateCursorAPIAvailable else { return }
+        if applySetsCursorInBackground() {
+            cursorInBgEnabled = true
+        }
+    }
+
+    private func probeSetsCursorInBackground() -> Bool {
+        let path = "/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices"
+        guard let handle = dlopen(path, RTLD_LAZY) else { return false }
+        defer { dlclose(handle) }
+        return dlsym(handle, "CGSSetConnectionProperty") != nil
+            && dlsym(handle, "_CGSDefaultConnection") != nil
+    }
+
+    private func applySetsCursorInBackground() -> Bool {
         typealias ConnID = Int32
         typealias SetPropFn = @convention(c) (ConnID, ConnID, CFString, CFBoolean) -> Int32
         typealias DefaultConnFn = @convention(c) () -> ConnID
         let path = "/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices"
-        guard let handle = dlopen(path, RTLD_LAZY) else { return }
+        guard let handle = dlopen(path, RTLD_LAZY) else { return false }
         defer { dlclose(handle) }
         guard
             let setSym = dlsym(handle, "CGSSetConnectionProperty"),
             let defSym = dlsym(handle, "_CGSDefaultConnection")
-        else { return }
+        else { return false }
         let setProp = unsafeBitCast(setSym, to: SetPropFn.self)
         let defConn = unsafeBitCast(defSym, to: DefaultConnFn.self)
         let cid = defConn()
-        _ = setProp(cid, cid, "SetsCursorInBackground" as CFString, kCFBooleanTrue)
-        cursorInBgEnabled = true
+        let rc = setProp(cid, cid, "SetsCursorInBackground" as CFString, kCFBooleanTrue)
+        return rc == 0
     }
 
     private func forceHideSystemCursor() {
         enableCursorControlInBackground()
+        /* Public fallback path — always attempted even when private CGS is unavailable. */
         let blank = NSCursor(
             image: NSImage(size: NSSize(width: 1, height: 1), flipped: false) { _ in true },
             hotSpot: .zero

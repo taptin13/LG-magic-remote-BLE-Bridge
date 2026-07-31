@@ -1,55 +1,55 @@
-# Voice / Siri qua LG Magic Remote MR25GA
+# Voice / Siri via LG Magic Remote MR25GA
 
-## Hiện có (không cần mic stream)
+## Available today (no mic stream)
 
-Trong **MagicRemoteBLE**, gán preset **Siri** (`key 0xFE`) cho bất kỳ phím — mặc định **AI** (`0x808B`).  
-Nhấn → app gọi `NSWorkspace` mở Siri. Chưa đưa audio từ remote vào mic hệ thống.
+In **MagicRemoteBLE**, assign the **Siri** preset (`key 0xFE`) to any key — default **AI** (`0x808B`).  
+Press → the app opens Siri via `NSWorkspace`. Audio from the remote is not yet routed into the system mic.
 
-## Mục tiêu dài hạn
+## Long-term goal
 
-Giữ mic trên remote → Mac mở Siri → giọng từ mic remote thành input Core Audio (virtual mic).
+Keep the mic on the remote → Mac opens Siri → remote mic audio becomes a Core Audio input (virtual mic).
 
-## Kiến trúc dự kiến (cập nhật theo stack GATT)
+## Planned architecture (GATT stack)
 
 ```
 LG Remote ──BLE──► ESP32 (MR-Proxy) ──GATT / USB?──► MagicRemoteBLE
-                         │                              ├── Siri (đã có)
+                         │                              ├── Siri (done)
                          │                              ├── VoiceDecoder (TBD)
                          │                              └── Virtual Mic (TBD)
-                         └── motion/button đã đi GATT Event
+                         └── motion/button already on GATT Event
 ```
 
-- Motion/button: **Custom GATT** (không còn BLE HID → Mac).
-- Voice: ưu tiên bridge packet/serial ổn định; BLE dual-link audio là nghẽn chính trên WROOM-32.
-- ESP **không decode** codec — chỉ forward / log.
+- Motion/button: **Custom GATT** (no BLE HID to the Mac).
+- Voice: prefer a stable bridge packet/serial path; dual-link BLE audio is the main bottleneck on WROOM-32.
+- ESP **does not decode** the codec — forward / log only.
 
-## Phase
+## Phases
 
-| Phase | Nội dung | Trạng thái |
-|------:|----------|------------|
-| **0** | Map phím → mở Siri (`0xFE`) | Xong |
-| **1** | Detect giữ mic / AI → log + (tuỳ) packet `type=5` Voice start/stop | Chưa |
-| **2** | Reverse: lệnh start/stop mic trên GATT LG (`A002` / vendor), codec, report ID | Chưa |
-| **3** | Framing audio → decoder PCM trên Mac | Chưa |
-| **4** | Core Audio virtual mic + set default input khi VOICE | Chưa |
-| **5** | (Tuỳ chọn) đo bitrate ESP→Mac qua BLE vs USB Serial | Chưa |
+| Phase | Work | Status |
+|------:|------|--------|
+| **0** | Key map → open Siri (`0xFE`) | Done |
+| **1** | Detect mic / AI hold → log + (optional) `type=5` Voice start/stop packet | Not started |
+| **2** | Reverse: start/stop mic on LG GATT (`A002` / vendor), codec, report ID | Not started |
+| **3** | Audio framing → PCM decoder on Mac | Not started |
+| **4** | Core Audio virtual mic + set default input on VOICE | Not started |
+| **5** | (Optional) measure ESP→Mac bitrate over BLE vs USB Serial | Not started |
 
-## GATT LG (cần probe)
+## LG GATT (needs probing)
 
-| UUID | Vai trò nghi ngờ |
-|------|------------------|
-| `D1FF` / `A001` | notify — chủ yếu report `0xFD` motion |
-| `D1FF` / `A002` | write — ứng viên start/stop voice |
-| `D0FF` / … | vendor — probe khi giữ mic |
+| UUID | Suspected role |
+|------|----------------|
+| `D1FF` / `A001` | notify — mainly report `0xFD` motion |
+| `D1FF` / `A002` | write — candidate start/stop voice |
+| `D0FF` / … | vendor — probe while holding mic |
 
 ## Virtual mic (Phase 4)
 
-Siri đọc **Core Audio input**, không đọc buffer app:
+Siri reads **Core Audio input**, not an app buffer:
 
-- Audio Server Plug-in / AudioDriverKit → device ảo
-- `VOICE start` → set default input → Siri → đẩy PCM
-- `VOICE stop` → drain → restore mic cũ
+- Audio Server Plug-in / AudioDriverKit → virtual device
+- `VOICE start` → set default input → Siri → push PCM
+- `VOICE stop` → drain → restore previous mic
 
-## Ghi chú
+## Notes
 
-WROOM-32 đủ cho bridge hiện tại. Voice stream cần đo bitrate trước khi chọn path BLE GATT vs USB UART.
+WROOM-32 is enough for the current bridge. Measure bitrate before choosing BLE GATT vs USB UART for voice streaming.

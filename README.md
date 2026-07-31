@@ -1,20 +1,20 @@
 # MagicRemote BLE Bridge
 
-Dùng LG Magic Remote **MR25GA** làm chuột bay + bàn phím trên Mac qua ESP32 dual-role proxy.
+Use an LG Magic Remote **MR25GA** as an air mouse + keyboard on Mac via an ESP32 dual-role BLE proxy.
 
 ```
 MR25GA (BLE Peripheral)
         ▲
    ESP32 Central
         │
-   Event Bus  →  Custom GATT Notify
+    Event Bus  →  Custom GATT Notify
         │
    ESP32 Peripheral  (`MR-Proxy`)
         ▼
-MagicRemoteBLE → CGEvent (chuột / phím / scroll / Siri)
+MagicRemoteBLE → CGEvent (mouse / keys / scroll / Siri)
 ```
 
-## Thành phần active
+## Active components
 
 | | Path |
 |---|---|
@@ -23,52 +23,48 @@ MagicRemoteBLE → CGEvent (chuột / phím / scroll / Siri)
 | Xcode | `MagicRemoteBLEBridge.xcodeproj` → scheme **MagicRemoteBLE** |
 | Bundle ID | `com.vuong.magicremote.ble2` |
 
-Dự án cũ: [`legacy/`](legacy/).
-
-## Chạy nhanh
+## Quick start
 
 ```bash
 # 1. Flash ESP32
 cd esp32-proxy-idf && pio run -t upload && pio device monitor -b 115200
 
-# 2. Build / chạy Mac app
+# 2. Build / run Mac app
 xcodebuild -scheme MagicRemoteBLE -configuration Debug build
-# hoặc mở .xcodeproj → Run MagicRemoteBLE
+# or open the .xcodeproj → Run MagicRemoteBLE
 ```
 
-1. Cấp **Bluetooth** + **Accessibility** cho app (System Settings).
-2. App scan → chọn **`MR-Proxy`** → Connect (bond lần đầu).
-3. Bấm nút trên remote nếu ESP đang SCAN `LGE MR25GA`.
-4. Status `ready` → bật Input mapping; gán **Mouse toggle** / **Siri** trong bảng map nếu cần.
+1. Grant **Bluetooth** + **Accessibility** to the app (System Settings).
+2. App scans → select **`MR-Proxy`** → Connect (bond on first connect).
+3. Press a button on the remote if the ESP is scanning for `LGE MR25GA`.
+4. When status is `ready`, enable input mapping; assign **Mouse toggle** / **Siri** in the map table if needed.
 
-## Tính năng Mac (tóm tắt)
+## Mac features (summary)
 
-- Airmouse + wheel scroll (Natural Scroll tùy chọn)
-- Map phím MR25GA → HID / media / **Siri** (`0xFE`) / **Mouse toggle** (`0xFD`)
-- **Mouse mode ON:** motion di chuyển chuột; Wheel/OK = trái; Settings = phải; Back = nút Back chuột
-- Pointer overlay (mũi tên phóng to) khi remote đang điều khiển
-- Calib / độ nhạy airmouse gửi xuống ESP qua Command char
+- Air mouse + wheel scroll (optional Natural Scroll)
+- Map MR25GA keys → HID / media / **Siri** (`0xFE`) / **Mouse toggle** (`0xFD`)
+- **Mouse mode ON:** motion moves the cursor; Wheel/OK = left click; Settings = right click; Back = mouse Back
+- Pointer overlay (enlarged arrow) while the remote is driving input
+- Calibration / air-mouse sensitivity sent to the ESP via the Command characteristic
 
-## Tài liệu
+## Docs
 
-| File | Nội dung |
+| File | Contents |
 |---|---|
-| [ARCHITECTURE.md](ARCHITECTURE.md) | Kiến trúc ESP + Mac (baseline) |
-| [PROTOCOL.md](PROTOCOL.md) | GATT UUID, packet, lệnh, mã phím |
-| [BASELINE.md](BASELINE.md) | Baseline đã test + tag |
-| [docs/TEST_MATRIX.md](docs/TEST_MATRIX.md) | Test matrix thực tế |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | ESP + Mac architecture (baseline) |
+| [PROTOCOL.md](PROTOCOL.md) | GATT UUIDs, packets, commands, key codes |
+| [BASELINE.md](BASELINE.md) | Tested baseline + tag |
+| [docs/TEST_MATRIX.md](docs/TEST_MATRIX.md) | Real-world test matrix |
 | [CHANGELOG.md](CHANGELOG.md) | Release notes |
-| [VOICE.md](VOICE.md) | Kế hoạch voice / mic → Siri |
-| [esp32-proxy-idf/README.md](esp32-proxy-idf/README.md) | Build / flash firmware |
-| [legacy/README.md](legacy/README.md) | Dự án cũ |
+| [VOICE.md](VOICE.md) | Voice / mic → Siri plan |
+| [esp32-proxy-idf/README.md](esp32-proxy-idf/README.md) | Firmware build / flash |
 
 ## CI
 
-GitHub Actions (`.github/workflows/ci.yml`): PlatformIO build, host unit tests, Xcode Debug (unsigned).
+GitHub Actions (`.github/workflows/ci.yml`): PlatformIO build, host unit tests, unsigned Xcode Debug build.
 
 ```bash
 cd esp32-proxy-idf/tests/host && make test
 ```
 
-Version hiện tại: xem [`VERSION`](VERSION).
-
+Current version: see [`VERSION`](VERSION).

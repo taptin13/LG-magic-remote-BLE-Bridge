@@ -9,7 +9,7 @@
 static const char *TAG = "BRIDGE";
 
 /**
- * Producer only — không gọi NimBLE trực tiếp.
+ * Producer only — does not call NimBLE directly.
  * BleCoreTask drain Event notify.
  */
 static void mac_bridge_task(void *arg) {

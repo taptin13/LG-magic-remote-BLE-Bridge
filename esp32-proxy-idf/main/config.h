@@ -8,18 +8,18 @@
 #define SCAN_INTERVAL    80
 #define SCAN_WINDOW      48
 
-/* Mac↔Proxy: yêu cầu link encrypted (Just Works bond) trước CMD write / ready.
- * Tắt (0) chỉ khi debug — nearby device có thể ghi CMD. */
+/* Mac↔Proxy: require encrypted link (Just Works bond) before CMD write / ready.
+ * Disable (0) for debug only — nearby device can write CMD. */
 #ifndef PROXY_REQUIRE_MAC_ENC
 #define PROXY_REQUIRE_MAC_ENC 1
 #endif
 
-/* Notify button/status: số lần thử tối đa + backoff khi ATT fail. */
+/* Notify button/status: max retry count + backoff on ATT fail. */
 #ifndef BRIDGE_NOTIFY_MAX_RETRY
 #define BRIDGE_NOTIFY_MAX_RETRY 5
 #endif
 
-/* Motion coalesce: ưu tiên độ trễ — clamp backlog, không giữ lịch sử vô hạn. */
+/* Motion coalesce: latency-first — clamp backlog, no unbounded history. */
 #ifndef MOTION_ACCUM_MAX
 #define MOTION_ACCUM_MAX 64
 #endif
