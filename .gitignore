@@ -6,6 +6,9 @@ xcuserdata/
 .vscode/
 .idea/
 
+# Legacy / archived trees — không theo dõi
+legacy/
+
 # PlatformIO / ESP-IDF
 esp32-proxy-idf/.pio/
 esp32-proxy-idf/sdkconfig
