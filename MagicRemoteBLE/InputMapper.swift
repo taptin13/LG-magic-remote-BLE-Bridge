@@ -87,7 +87,8 @@ final class InputMapper: ObservableObject {
     private let smoothQueue = DispatchQueue(label: "mr.mouse.smooth", qos: .userInteractive)
 
     /// Adaptive tau by residual speed (low → smooth; fast → less lag).
-    private static let pendingMotionCap: Double = 64
+    /// Match firmware MOTION_ACCUM_MAX — avoid clipping fast flicks on Mac side.
+    private static let pendingMotionCap: Double = 2048
     private static let pointerActivityMinInterval: CFTimeInterval = 1.0 / 45.0
 
     private static func smoothTau(forSpeed speed: Double) -> CFTimeInterval {
@@ -510,8 +511,8 @@ final class InputMapper: ObservableObject {
             lock.unlock()
             return
         }
-        var dx = pendingDX
-        var dy = pendingDY
+        let dx = pendingDX
+        let dy = pendingDY
         let drag = pendingDragButton
         if dx == 0 && dy == 0 {
             lastSmoothAt = now
@@ -704,7 +705,11 @@ final class InputMapper: ObservableObject {
 
     private func activateSiri() {
         DispatchQueue.main.async {
-            _ = NSWorkspace.shared.launchApplication("Siri")
+            let workspace = NSWorkspace.shared
+            let siriURL =
+                workspace.urlForApplication(withBundleIdentifier: "com.apple.Siri")
+                ?? URL(fileURLWithPath: "/System/Applications/Siri.app")
+            workspace.openApplication(at: siriURL, configuration: NSWorkspace.OpenConfiguration()) { _, _ in }
         }
         logAsync(.ok, "Siri")
     }

@@ -12,14 +12,25 @@ final class AppModel: ObservableObject {
     @Published var lastButtonCode: UInt16 = 0
     @Published var lastButtonName = ""
 
+    /// Airmouse defaults + UI ranges — single source of truth.
+    /// Ranges stay inside firmware clamps (sens 0.005–0.5, thresh 20–2000, dead 0–200).
+    enum Airmouse {
+        static let sensDefault = 0.045
+        static let sensRange = 0.005...0.200
+        static let threshDefault = 280.0
+        static let threshRange = 20.0...1000.0
+        static let deadDefault = 28.0
+        static let deadRange = 0.0...100.0
+    }
+
     /// Airmouse — sent to ESP via CMD 0x02.
-    @Published var sensitivity: Double = 0.045 {
+    @Published var sensitivity: Double = Airmouse.sensDefault {
         didSet { if !loadingPrefs { schedulePushAirmouse() } }
     }
-    @Published var threshold: Double = 280 {
+    @Published var threshold: Double = Airmouse.threshDefault {
         didSet { if !loadingPrefs { schedulePushAirmouse() } }
     }
-    @Published var softDead: Double = 28 {
+    @Published var softDead: Double = Airmouse.deadDefault {
         didSet { if !loadingPrefs { schedulePushAirmouse() } }
     }
 
@@ -188,9 +199,9 @@ final class AppModel: ObservableObject {
     }
 
     func resetAirmouse() {
-        sensitivity = 0.045
-        threshold = 280
-        softDead = 28
+        sensitivity = Airmouse.sensDefault
+        threshold = Airmouse.threshDefault
+        softDead = Airmouse.deadDefault
         pushAirmouseNow()
         host.log(.ok, "Airmouse reset to defaults")
     }
@@ -245,7 +256,9 @@ final class AppModel: ObservableObject {
         }
         host.log(.info, "Metrics recording → \(url.path)")
         metricsTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
-            self?.recordMetrics()
+            Task { @MainActor in
+                self?.recordMetrics()
+            }
         }
     }
 
@@ -254,7 +267,7 @@ final class AppModel: ObservableObject {
         let line = "\(ISO8601DateFormatter().string(from: Date())),\(PerformanceMetrics.shared.csvLine())\n"
         guard let data = line.data(using: .utf8), let handle = try? FileHandle(forWritingTo: url) else { return }
         defer { try? handle.close() }
-        try? handle.seekToEnd()
+        _ = try? handle.seekToEnd()
         try? handle.write(contentsOf: data)
     }
 
@@ -429,9 +442,17 @@ final class AppModel: ObservableObject {
         defer { loadingPrefs = false }
         let d = UserDefaults.standard
 
-        if d.object(forKey: PrefKey.sens) != nil { sensitivity = d.double(forKey: PrefKey.sens) }
-        if d.object(forKey: PrefKey.thresh) != nil { threshold = d.double(forKey: PrefKey.thresh) }
-        if d.object(forKey: PrefKey.dead) != nil { softDead = d.double(forKey: PrefKey.dead) }
+        /* Clamp to slider ranges — out-of-range prefs pinned the thumb while the
+         * label showed the raw value (misaligned display). */
+        if d.object(forKey: PrefKey.sens) != nil {
+            sensitivity = d.double(forKey: PrefKey.sens).clamped(to: Airmouse.sensRange)
+        }
+        if d.object(forKey: PrefKey.thresh) != nil {
+            threshold = d.double(forKey: PrefKey.thresh).clamped(to: Airmouse.threshRange)
+        }
+        if d.object(forKey: PrefKey.dead) != nil {
+            softDead = d.double(forKey: PrefKey.dead).clamped(to: Airmouse.deadRange)
+        }
         if d.object(forKey: PrefKey.largePointer) != nil {
             largePointer = d.bool(forKey: PrefKey.largePointer)
         }
@@ -484,5 +505,11 @@ final class AppModel: ObservableObject {
         static let mouseMode = "mrble.mouseMode"
         static let autoConnect = "mrble.autoConnect"
         static let preferredPeripheral = "mrble.preferredPeripheral"
+    }
+}
+
+private extension Double {
+    func clamped(to range: ClosedRange<Double>) -> Double {
+        min(max(self, range.lowerBound), range.upperBound)
     }
 }

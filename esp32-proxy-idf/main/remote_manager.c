@@ -622,9 +622,6 @@ static int gap_event(struct ble_gap_event *event, void *arg) {
       if (action == BLE_SM_IOACT_INPUT || action == BLE_SM_IOACT_DISP) passkey = 0;
       /* NUMCMP accept encoded as passkey=1 for our inject helper — see below */
       if (action == BLE_SM_IOACT_NUMCMP) {
-        struct ble_sm_io pkey = {0};
-        pkey.action = action;
-        pkey.numcmp_accept = 1;
         /* Must go through owner — post full inject via cmd with action only;
          * NUMCMP needs numcmp_accept; extend if needed. */
         ble_core_cmd_sm_inject(event->passkey.conn_handle, action, 1);

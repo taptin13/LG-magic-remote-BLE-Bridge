@@ -21,6 +21,8 @@ typedef struct {
   uint32_t button_synthetic_release;
   uint32_t motion_coalesced;
   uint32_t motion_saturated;
+  uint32_t motion_requeued;
+  uint32_t motion_notify_ok;
 } bridge_metrics_t;
 
 void bridge_metrics_init(void);

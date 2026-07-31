@@ -65,13 +65,43 @@ static int s_pending_rel_n;
 static int16_t clamp_motion_axis(int32_t value, bool *saturated) {
   if (value > MOTION_ACCUM_MAX) {
     *saturated = true;
-    return MOTION_ACCUM_MAX;
+    return (int16_t)MOTION_ACCUM_MAX;
   }
   if (value < -MOTION_ACCUM_MAX) {
     *saturated = true;
-    return -MOTION_ACCUM_MAX;
+    return (int16_t)(-MOTION_ACCUM_MAX);
   }
   return (int16_t)value;
+}
+
+/** Caller holds s_tx_mu. Fold relative motion into the pending slot (preserve deltas). */
+static void coalesce_motion_locked(const bridge_packet_t *pkt, bool count_as_requeue) {
+  if (!pkt || pkt->type != PKT_MOTION) return;
+  uint32_t gen = s_tx_gen;
+  if (s_motion_pend && s_motion_gen == gen) {
+    bool saturated = false;
+    int32_t dx = (int32_t)s_motion_latest.u.motion.dx + pkt->u.motion.dx;
+    int32_t dy = (int32_t)s_motion_latest.u.motion.dy + pkt->u.motion.dy;
+    int32_t wheel = (int32_t)s_motion_latest.u.motion.wheel + pkt->u.motion.wheel;
+    s_motion_latest.u.motion.dx = clamp_motion_axis(dx, &saturated);
+    s_motion_latest.u.motion.dy = clamp_motion_axis(dy, &saturated);
+    if (wheel > 127) {
+      wheel = 127;
+      saturated = true;
+    } else if (wheel < -127) {
+      wheel = -127;
+      saturated = true;
+    }
+    s_motion_latest.u.motion.wheel = (int8_t)wheel;
+    s_motion_latest.u.motion.buttons = pkt->u.motion.buttons;
+    bridge_metrics()->motion_coalesced++;
+    if (saturated) bridge_metrics()->motion_saturated++;
+  } else {
+    s_motion_latest = *pkt;
+  }
+  s_motion_pend = true;
+  s_motion_gen = gen;
+  if (count_as_requeue) bridge_metrics()->motion_requeued++;
 }
 
 bool ble_core_is_owner(void) {
@@ -343,29 +373,7 @@ bool ble_core_submit_packet(const bridge_packet_t *pkt) {
   uint32_t gen = s_tx_gen;
 
   if (pkt->type == PKT_MOTION) {
-    if (s_motion_pend && s_motion_gen == gen) {
-      bool saturated = false;
-      int32_t dx = (int32_t)s_motion_latest.u.motion.dx + pkt->u.motion.dx;
-      int32_t dy = (int32_t)s_motion_latest.u.motion.dy + pkt->u.motion.dy;
-      int32_t wheel = (int32_t)s_motion_latest.u.motion.wheel + pkt->u.motion.wheel;
-      s_motion_latest.u.motion.dx = clamp_motion_axis(dx, &saturated);
-      s_motion_latest.u.motion.dy = clamp_motion_axis(dy, &saturated);
-      if (wheel > 127) {
-        wheel = 127;
-        saturated = true;
-      } else if (wheel < -127) {
-        wheel = -127;
-        saturated = true;
-      }
-      s_motion_latest.u.motion.wheel = (int8_t)wheel;
-      s_motion_latest.u.motion.buttons = pkt->u.motion.buttons;
-      bridge_metrics()->motion_coalesced++;
-      if (saturated) bridge_metrics()->motion_saturated++;
-    } else {
-      s_motion_latest = *pkt;
-    }
-    s_motion_pend = true;
-    s_motion_gen = gen;
+    coalesce_motion_locked(pkt, false);
     xSemaphoreGive(s_tx_mu);
     if (s_wake) xSemaphoreGive(s_wake);
     return true;
@@ -476,16 +484,34 @@ static void drain_tx(int64_t budget_us) {
     }
     xSemaphoreGive(s_tx_mu);
 
-    if (!mac_gatt_mac_ready()) continue;
-    if (bridge_fault_should_drop_tx()) {
-      bridge_metrics()->tx_notify_fail++;
+    if (!mac_gatt_mac_ready()) {
+      if (it.pkt.type == PKT_MOTION) {
+        xSemaphoreTake(s_tx_mu, portMAX_DELAY);
+        if (it.gen == s_tx_gen) coalesce_motion_locked(&it.pkt, true);
+        xSemaphoreGive(s_tx_mu);
+      }
       continue;
     }
-    if (mac_gatt_notify_raw(&it.pkt)) continue;
+    if (bridge_fault_should_drop_tx()) {
+      bridge_metrics()->tx_notify_fail++;
+      if (it.pkt.type == PKT_MOTION) {
+        xSemaphoreTake(s_tx_mu, portMAX_DELAY);
+        if (it.gen == s_tx_gen) coalesce_motion_locked(&it.pkt, true);
+        xSemaphoreGive(s_tx_mu);
+      }
+      continue;
+    }
+    if (mac_gatt_notify_raw(&it.pkt)) {
+      if (it.pkt.type == PKT_MOTION) bridge_metrics()->motion_notify_ok++;
+      continue;
+    }
 
     bridge_metrics()->tx_notify_fail++;
     if (it.pkt.type == PKT_MOTION) {
-      bridge_metrics()->tx_drop_motion++;
+      /* Keep relative delta — do not drop on transient ATT congestion. */
+      xSemaphoreTake(s_tx_mu, portMAX_DELAY);
+      if (it.gen == s_tx_gen) coalesce_motion_locked(&it.pkt, true);
+      xSemaphoreGive(s_tx_mu);
       continue;
     }
     if (it.attempts + 1 >= BRIDGE_NOTIFY_MAX_RETRY) {

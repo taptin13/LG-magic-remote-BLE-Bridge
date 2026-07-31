@@ -187,18 +187,34 @@ struct ConnectionView: View {
                 }
 
                 Section {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("Sensitivity \(String(format: "%.3f", model.sensitivity))")
-                        Slider(value: $model.sensitivity, in: 0.010...0.200, step: 0.001)
+                    airmouseSlider(
+                        label: "Sensitivity",
+                        value: $model.sensitivity,
+                        range: AppModel.Airmouse.sensRange,
+                        step: 0.001,
+                        format: { String(format: "%.3f", $0) }
+                    )
+                    airmouseSlider(
+                        label: "Pointer threshold",
+                        value: $model.threshold,
+                        range: AppModel.Airmouse.threshRange,
+                        step: 10,
+                        format: { "\(Int($0))" }
+                    )
+                    airmouseSlider(
+                        label: "Deadzone",
+                        value: $model.softDead,
+                        range: AppModel.Airmouse.deadRange,
+                        step: 1,
+                        format: { "\(Int($0))" }
+                    )
+
+                    Button {
+                        model.resetAirmouse()
+                    } label: {
+                        Label("Reset defaults", systemImage: "arrow.counterclockwise")
                     }
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("Pointer threshold \(Int(model.threshold))")
-                        Slider(value: $model.threshold, in: 50...800, step: 10)
-                    }
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("Deadzone \(Int(model.softDead))")
-                        Slider(value: $model.softDead, in: 0...80, step: 1)
-                    }
+                    .help("Sensitivity \(String(format: "%.3f", AppModel.Airmouse.sensDefault)), threshold \(Int(AppModel.Airmouse.threshDefault)), deadzone \(Int(AppModel.Airmouse.deadDefault))")
                 } header: {
                     Text("Airmouse")
                 } footer: {
@@ -281,14 +297,6 @@ struct ConnectionView: View {
                 .help("Send calib command to ESP32")
 
                 Button {
-                    model.resetAirmouse()
-                } label: {
-                    Label("Reset Sens", systemImage: "arrow.counterclockwise")
-                }
-                .disabled(model.host.phase != .ready)
-                .help("Reset airmouse sensitivity to defaults (0.045)")
-
-                Button {
                     model.pushAirmouseNow()
                 } label: {
                     Label("Apply Sens", systemImage: "slider.horizontal.3")
@@ -304,6 +312,36 @@ struct ConnectionView: View {
                 .help("Write BLE-to-CGEvent latency metrics to Activity")
             }
         }
+    }
+
+    private func airmouseSlider(
+        label: String,
+        value: Binding<Double>,
+        range: ClosedRange<Double>,
+        step: Double,
+        format: @escaping (Double) -> String
+    ) -> some View {
+        /* Avoid Slider minimumValueLabel/maximumValueLabel — on macOS Form they
+         * sit beside the track and push the fill/thumb out of alignment. */
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(label)
+                Spacer(minLength: 8)
+                Text(format(value.wrappedValue))
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+            }
+            Slider(value: value, in: range, step: step)
+            HStack {
+                Text(format(range.lowerBound))
+                Spacer()
+                Text(format(range.upperBound))
+            }
+            .font(.caption2)
+            .monospacedDigit()
+            .foregroundStyle(.tertiary)
+        }
+        .padding(.vertical, 2)
     }
 
     @ViewBuilder

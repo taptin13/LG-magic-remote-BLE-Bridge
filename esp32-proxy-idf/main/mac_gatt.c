@@ -90,13 +90,14 @@ static void refresh_ready(void) {
     ESP_LOGI(TAG, "Mac ready (sub=%d enc=%d)", (int)s_subscribed, (int)s_encrypted);
     bridge_state_set_mac(MAC_READY);
     struct ble_gap_upd_params up = {
-        .itvl_min = 6,
-        .itvl_max = 9,
+        .itvl_min = MAC_CONN_ITVL_MIN,
+        .itvl_max = MAC_CONN_ITVL_MAX,
         .latency = 0,
         .supervision_timeout = 400,
         .min_ce_len = 0,
         .max_ce_len = 0,
     };
+    ESP_LOGI(TAG, "request Mac CI itvl=%u..%u (×1.25ms)", up.itvl_min, up.itvl_max);
     ble_core_cmd_gap_update(s_conn, &up);
     mac_gatt_set_status(ST_SCAN_REMOTE);
   }

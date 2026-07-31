@@ -24,9 +24,19 @@
 #define BRIDGE_NOTIFY_MAX_RETRY 5
 #endif
 
-/* Motion coalesce: latency-first — clamp backlog, no unbounded history. */
+/* Motion coalesce backlog (px). Was 64 — fast flicks saturated and felt soft.
+ * Keep well under int16; wire payload is still int16 dx/dy. */
 #ifndef MOTION_ACCUM_MAX
-#define MOTION_ACCUM_MAX 64
+#define MOTION_ACCUM_MAX 2048
+#endif
+
+/* Mac link CI request (NimBLE units = 1.25ms). 12 = 15ms — Apple-friendly;
+ * 6–9 (7.5–11.25ms) is often rejected and left at ~30ms. */
+#ifndef MAC_CONN_ITVL_MIN
+#define MAC_CONN_ITVL_MIN 12
+#endif
+#ifndef MAC_CONN_ITVL_MAX
+#define MAC_CONN_ITVL_MAX 12
 #endif
 
 /* LG vendor service 0000D1FF-3C17-D293-8E48-14FE2E4DA212 (LE bytes) */
