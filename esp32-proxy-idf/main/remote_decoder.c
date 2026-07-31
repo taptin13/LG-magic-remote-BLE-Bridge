@@ -13,6 +13,7 @@ static const char *TAG = "DEC";
 struct remote_decoder {
   float sens, thresh, soft_dead;
   double gyro_lpf[3], gyro_bias[3], bias_sum[3];
+  double bias_min[3], bias_max[3];
   int bias_samples;
   bool calibrating, pointer_mode;
   double carry_x, carry_y;
@@ -21,6 +22,10 @@ struct remote_decoder {
 };
 
 static const int kBiasWarmup = 60;
+/* Reject calibration windows containing hand movement. Raw gyro noise while
+ * stationary is well below this span; a moving reconnect starts a fresh
+ * window and calibrates automatically once the remote is held still. */
+static const double kBiasStableSpan = 90.0;
 static const double kLpf = 0.42;
 static const double kStill = 70.0;
 /* ~80ms still (FD ~100Hz) before clearing fractional carry. */
@@ -41,6 +46,8 @@ void remote_decoder_reset(remote_decoder_t *d) {
   memset(d->gyro_lpf, 0, sizeof(d->gyro_lpf));
   memset(d->gyro_bias, 0, sizeof(d->gyro_bias));
   memset(d->bias_sum, 0, sizeof(d->bias_sum));
+  memset(d->bias_min, 0, sizeof(d->bias_min));
+  memset(d->bias_max, 0, sizeof(d->bias_max));
   d->bias_samples = 0;
   d->calibrating = true;
   d->pointer_mode = false;
@@ -93,6 +100,32 @@ void remote_decoder_on_fd(remote_decoder_t *d, const uint8_t *p, size_t len) {
   int8_t wheel = (int8_t)p[18];
 
   if (d->calibrating) {
+    if (d->bias_samples == 0) {
+      d->bias_min[0] = d->bias_max[0] = gx;
+      d->bias_min[1] = d->bias_max[1] = gy;
+      d->bias_min[2] = d->bias_max[2] = gz;
+    } else {
+      if (gx < d->bias_min[0]) d->bias_min[0] = gx;
+      if (gx > d->bias_max[0]) d->bias_max[0] = gx;
+      if (gy < d->bias_min[1]) d->bias_min[1] = gy;
+      if (gy > d->bias_max[1]) d->bias_max[1] = gy;
+      if (gz < d->bias_min[2]) d->bias_min[2] = gz;
+      if (gz > d->bias_max[2]) d->bias_max[2] = gz;
+    }
+
+    bool stable = (d->bias_max[0] - d->bias_min[0] <= kBiasStableSpan) &&
+                  (d->bias_max[1] - d->bias_min[1] <= kBiasStableSpan) &&
+                  (d->bias_max[2] - d->bias_min[2] <= kBiasStableSpan);
+    if (!stable) {
+      d->bias_sum[0] = gx;
+      d->bias_sum[1] = gy;
+      d->bias_sum[2] = gz;
+      d->bias_min[0] = d->bias_max[0] = gx;
+      d->bias_min[1] = d->bias_max[1] = gy;
+      d->bias_min[2] = d->bias_max[2] = gz;
+      d->bias_samples = 1;
+      goto decode_buttons;
+    }
     d->bias_sum[0] += gx;
     d->bias_sum[1] += gy;
     d->bias_sum[2] += gz;
@@ -154,6 +187,7 @@ void remote_decoder_on_fd(remote_decoder_t *d, const uint8_t *p, size_t len) {
     }
   }
 
+decode_buttons:
   /* Wheel: separate channel — not shared accumulator with cursor. */
   if (wheel != 0) {
     pub_wheel(wheel);

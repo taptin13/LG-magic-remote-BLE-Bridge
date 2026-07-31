@@ -13,6 +13,8 @@ bool event_bus_publish_motion(int16_t dx, int16_t dy, uint16_t buttons, int8_t w
 bool event_bus_publish_wheel(int8_t wheel);
 bool event_bus_take_motion(motion_payload_t *out);
 void event_bus_requeue_motion(int16_t dx, int16_t dy, uint16_t buttons, int8_t wheel);
+/** Drop cursor/wheel residuals when the remote session changes. */
+void event_bus_reset_motion(void);
 bool event_bus_take(bus_event_t *out, uint32_t timeout_ms);
 
 #ifdef __cplusplus

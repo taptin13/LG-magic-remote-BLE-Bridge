@@ -100,6 +100,8 @@ bool ble_core_post_disc_evt(const ble_disc_evt_t *evt);
 
 bool ble_core_submit_packet(const bridge_packet_t *pkt);
 void ble_core_flush_tx(void);
+/** Drop only relative motion; reliable button/status traffic is preserved. */
+void ble_core_drop_motion(void);
 uint32_t ble_core_tx_gen(void);
 void ble_core_release_pressed_buttons(void);
 

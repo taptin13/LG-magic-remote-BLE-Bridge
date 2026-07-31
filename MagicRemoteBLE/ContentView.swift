@@ -295,6 +295,13 @@ struct ConnectionView: View {
                 }
                 .disabled(model.host.phase != .ready)
                 .help("Push airmouse settings to ESP")
+
+                Button {
+                    model.logPerformanceMetrics()
+                } label: {
+                    Label("Metrics", systemImage: "gauge.with.dots.needle.33percent")
+                }
+                .help("Write BLE-to-CGEvent latency metrics to Activity")
             }
         }
     }

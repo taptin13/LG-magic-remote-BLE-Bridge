@@ -48,5 +48,6 @@ static void mac_bridge_task(void *arg) {
 }
 
 void mac_bridge_start(void) {
-  xTaskCreatePinnedToCore(mac_bridge_task, "macBridge", 3072, NULL, 8, NULL, 1);
+  /* Keep the producer responsive; BleCoreTask remains the sole BLE owner. */
+  xTaskCreatePinnedToCore(mac_bridge_task, "macBridge", 3072, NULL, 9, NULL, 1);
 }

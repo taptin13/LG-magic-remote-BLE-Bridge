@@ -62,6 +62,18 @@ static int s_pressed_n;
 static uint16_t s_pending_rel[PRESSED_MAX];
 static int s_pending_rel_n;
 
+static int16_t clamp_motion_axis(int32_t value, bool *saturated) {
+  if (value > MOTION_ACCUM_MAX) {
+    *saturated = true;
+    return MOTION_ACCUM_MAX;
+  }
+  if (value < -MOTION_ACCUM_MAX) {
+    *saturated = true;
+    return -MOTION_ACCUM_MAX;
+  }
+  return (int16_t)value;
+}
+
 bool ble_core_is_owner(void) {
   return s_owner && xTaskGetCurrentTaskHandle() == s_owner;
 }
@@ -331,7 +343,27 @@ bool ble_core_submit_packet(const bridge_packet_t *pkt) {
   uint32_t gen = s_tx_gen;
 
   if (pkt->type == PKT_MOTION) {
-    s_motion_latest = *pkt;
+    if (s_motion_pend && s_motion_gen == gen) {
+      bool saturated = false;
+      int32_t dx = (int32_t)s_motion_latest.u.motion.dx + pkt->u.motion.dx;
+      int32_t dy = (int32_t)s_motion_latest.u.motion.dy + pkt->u.motion.dy;
+      int32_t wheel = (int32_t)s_motion_latest.u.motion.wheel + pkt->u.motion.wheel;
+      s_motion_latest.u.motion.dx = clamp_motion_axis(dx, &saturated);
+      s_motion_latest.u.motion.dy = clamp_motion_axis(dy, &saturated);
+      if (wheel > 127) {
+        wheel = 127;
+        saturated = true;
+      } else if (wheel < -127) {
+        wheel = -127;
+        saturated = true;
+      }
+      s_motion_latest.u.motion.wheel = (int8_t)wheel;
+      s_motion_latest.u.motion.buttons = pkt->u.motion.buttons;
+      bridge_metrics()->motion_coalesced++;
+      if (saturated) bridge_metrics()->motion_saturated++;
+    } else {
+      s_motion_latest = *pkt;
+    }
     s_motion_pend = true;
     s_motion_gen = gen;
     xSemaphoreGive(s_tx_mu);
@@ -402,6 +434,14 @@ bool ble_core_submit_packet(const bridge_packet_t *pkt) {
   flush_pending_releases_locked();
   xSemaphoreGive(s_tx_mu);
   return false;
+}
+
+void ble_core_drop_motion(void) {
+  if (!s_tx_mu) return;
+  xSemaphoreTake(s_tx_mu, portMAX_DELAY);
+  s_motion_pend = false;
+  memset(&s_motion_latest, 0, sizeof(s_motion_latest));
+  xSemaphoreGive(s_tx_mu);
 }
 
 static void drain_tx(int64_t budget_us) {
@@ -671,9 +711,9 @@ static void ble_core_task(void *arg) {
     remote_manager_tick();
 
     if (s_wake) {
-      xSemaphoreTake(s_wake, pdMS_TO_TICKS(8));
+      xSemaphoreTake(s_wake, pdMS_TO_TICKS(BLE_CORE_IDLE_WAIT_MS));
     } else {
-      vTaskDelay(pdMS_TO_TICKS(8));
+      vTaskDelay(pdMS_TO_TICKS(BLE_CORE_IDLE_WAIT_MS));
     }
   }
 }

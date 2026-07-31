@@ -91,9 +91,11 @@ final class InputMapper: ObservableObject {
     private static let pointerActivityMinInterval: CFTimeInterval = 1.0 / 45.0
 
     private static func smoothTau(forSpeed speed: Double) -> CFTimeInterval {
-        if speed < 3 { return 0.014 }
-        if speed < 12 { return 0.008 }
-        return 0.004
+        // Keep low-speed motion stable without leaving a visible trailing
+        // feel. Faster motion gets a shorter tau to remain responsive.
+        if speed < 3 { return 0.010 }
+        if speed < 12 { return 0.006 }
+        return 0.0035
     }
 
     /// HID usage → macOS virtual key.
@@ -197,6 +199,7 @@ final class InputMapper: ObservableObject {
         guard enabledFlag, trustedFlag else { return }
         switch packet.type {
         case .motion:
+            defer { PerformanceMetrics.shared.motionHandled() }
             applyMouse(dx: Int(packet.dx), dy: Int(packet.dy), wheel: Int(packet.wheel))
         case .button:
             applyButton(code: packet.buttonCode, down: packet.buttonDown)
@@ -460,7 +463,9 @@ final class InputMapper: ObservableObject {
     private func ensureSmoothTimer() {
         guard smoothingFlag, smoothTimer == nil else { return }
         let t = DispatchSource.makeTimerSource(queue: smoothQueue)
-        t.schedule(deadline: .now(), repeating: .milliseconds(8), leeway: .milliseconds(1))
+        // 4 ms display-side cadence reduces motion quantization without a
+        // MainActor hop; BLE motion already arrives through InputPacketSink.
+        t.schedule(deadline: .now(), repeating: .milliseconds(4), leeway: .milliseconds(1))
         t.setEventHandler { [weak self] in self?.smoothTick() }
         t.resume()
         smoothTimer = t
@@ -517,7 +522,7 @@ final class InputMapper: ObservableObject {
         if lastSmoothAt > 0 {
             dt = min(0.05, max(0.001, now - lastSmoothAt))
         } else {
-            dt = 0.008
+            dt = 0.004
         }
         lastSmoothAt = now
         let speed = hypot(dx, dy)
@@ -792,6 +797,7 @@ final class InputMapper: ObservableObject {
             ev.setIntegerValueField(.mouseEventButtonNumber, value: Int64(button.rawValue))
         }
         ev.post(tap: .cghidEventTap)
+        PerformanceMetrics.shared.eventPosted()
     }
     private func mouseClick(button: CGMouseButton, down: Bool) {
         let loc = NSEvent.mouseLocation

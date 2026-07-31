@@ -3,6 +3,7 @@
 #include "bridge_state.h"
 #include "bridge_metrics.h"
 #include "config.h"
+#include "event_bus.h"
 #include "mac_gatt.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -79,6 +80,12 @@ static int write_next_cccd(void);
 static void run_next_job_dsc(void);
 
 static int64_t now_ms(void) { return esp_timer_get_time() / 1000; }
+
+static void reset_motion_session(void) {
+  event_bus_reset_motion();
+  ble_core_drop_motion();
+  if (s_dec) remote_decoder_reset(s_dec);
+}
 
 static void remember_report(uint16_t handle, uint8_t id) {
   if (s_rep_count >= 16) return;
@@ -468,7 +475,7 @@ static void discover_fail(void) {
 static void finish_discover_ok(void) {
   s_disc_ok = true;
   save_cache();
-  if (s_dec) remote_decoder_reset(s_dec);
+  reset_motion_session();
   struct ble_gap_upd_params up = {
       .itvl_min = 6,
       .itvl_max = 9,
@@ -570,6 +577,7 @@ static int gap_event(struct ble_gap_event *event, void *arg) {
         s_conn_gen++;
         s_disc_gen++;
         bridge_session_bump_remote();
+        reset_motion_session();
         ble_core_cmd_release_buttons();
         s_remote_drop = true;
       }

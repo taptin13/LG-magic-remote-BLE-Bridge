@@ -8,6 +8,11 @@
 #define SCAN_INTERVAL    80
 #define SCAN_WINDOW      48
 
+/* Maximum idle wait for the BLE owner loop before checking work again. */
+#ifndef BLE_CORE_IDLE_WAIT_MS
+#define BLE_CORE_IDLE_WAIT_MS 2
+#endif
+
 /* Mac↔Proxy: require encrypted link (Just Works bond) before CMD write / ready.
  * Disable (0) for debug only — nearby device can write CMD. */
 #ifndef PROXY_REQUIRE_MAC_ENC

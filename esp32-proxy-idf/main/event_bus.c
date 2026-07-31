@@ -70,6 +70,19 @@ bool event_bus_publish_wheel(int8_t wheel) {
   return true;
 }
 
+void event_bus_reset_motion(void) {
+  portENTER_CRITICAL(&s_motion_mux);
+  s_mx = s_my = 0;
+  s_mbtn = 0;
+  s_mpend = false;
+  portEXIT_CRITICAL(&s_motion_mux);
+
+  portENTER_CRITICAL(&s_wheel_mux);
+  s_mwheel = 0;
+  s_wpend = false;
+  portEXIT_CRITICAL(&s_wheel_mux);
+}
+
 bool event_bus_take_motion(motion_payload_t *out) {
   if (!out) return false;
 

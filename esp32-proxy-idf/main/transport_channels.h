@@ -7,7 +7,7 @@ extern "C" {
 #endif
 
 /**
- * Typed transport API — motion latest / button reliable / status latest.
+ * Typed transport API — bounded relative-motion coalescing / button reliable / status latest.
  * Currently delegates to ble_core_submit_packet (TX owner).
  */
 

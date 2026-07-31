@@ -489,7 +489,11 @@ extension BLEBridgeHost: CBPeripheralDelegate {
             return
         }
         guard uuid == BridgeUUID.event || uuid == BridgeUUID.hid else { return }
-        guard let pkt = BridgePacket.parse(data) else { return }
+        guard let pkt = BridgePacket.parse(data) else {
+            PerformanceMetrics.shared.parseError()
+            return
+        }
+        PerformanceMetrics.shared.received(pkt)
 
         /* Motion: inject on BLE queue only — no MainActor hop (smoother). */
         if pkt.type == .motion {

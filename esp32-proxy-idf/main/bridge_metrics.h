@@ -19,6 +19,8 @@ typedef struct {
   uint32_t cccd_timeout;
   uint32_t reconnect_count;
   uint32_t button_synthetic_release;
+  uint32_t motion_coalesced;
+  uint32_t motion_saturated;
 } bridge_metrics_t;
 
 void bridge_metrics_init(void);

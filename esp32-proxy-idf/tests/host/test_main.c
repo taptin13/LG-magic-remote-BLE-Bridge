@@ -105,6 +105,48 @@ static void test_decoder_buttons(void) {
   free(d);
 }
 
+static void fd_set_gyro(uint8_t fd[19], int16_t gx, int16_t gy, int16_t gz) {
+  int16_t gyro[3] = {gx, gy, gz};
+  for (int i = 0; i < 3; i++) {
+    uint16_t raw = (uint16_t)gyro[i];
+    fd[4 + i * 2] = (uint8_t)(raw >> 8);
+    fd[5 + i * 2] = (uint8_t)raw;
+  }
+}
+
+static void test_decoder_reconnect_calibration(void) {
+  event_bus_init();
+  remote_decoder_t *d = remote_decoder_create();
+  EXPECT(d != NULL);
+  remote_decoder_reset(d);
+  uint8_t fd[19] = {0};
+  fd[0] = 0xFD;
+
+  /* Hand movement after reconnect must not become the new gyro bias. */
+  for (int i = 0; i < 80; i++) {
+    int16_t v = (i & 1) ? 500 : -500;
+    fd_set_gyro(fd, v, 0, (int16_t)-v);
+    remote_decoder_on_fd(d, fd, sizeof(fd));
+  }
+  EXPECT(event_bus_stub_count() == 0);
+
+  /* Once stationary, calibration completes automatically. */
+  for (int i = 0; i < 60; i++) {
+    fd_set_gyro(fd, 100, -20, 80);
+    remote_decoder_on_fd(d, fd, sizeof(fd));
+  }
+  fd_set_gyro(fd, 900, -20, 900);
+  remote_decoder_on_fd(d, fd, sizeof(fd));
+
+  bus_event_t ev;
+  int saw_motion = 0;
+  while (event_bus_take(&ev, 0)) {
+    if (ev.type == BUS_MOTION && (ev.u.motion.dx || ev.u.motion.dy)) saw_motion = 1;
+  }
+  EXPECT(saw_motion == 1);
+  free(d);
+}
+
 static void test_fault_inject(void) {
   bridge_fault_reset();
   bridge_fault()->drop_next_tx = 2;
@@ -120,6 +162,7 @@ int main(void) {
   test_packet_roundtrip();
   test_bridge_state();
   test_decoder_buttons();
+  test_decoder_reconnect_calibration();
   test_fault_inject();
   if (g_fail) {
     fprintf(stderr, "%d assertion(s) failed\n", g_fail);

@@ -82,6 +82,8 @@ final class AppModel: ObservableObject {
     private var savedMouseMode = false
     private var lastPersistedMapEnabled = false
     private var lastPersistedMouseMode = false
+    private var metricsTimer: Timer?
+    private var metricsURL: URL?
 
     /// Label pending Learn (shown in UI) — empty if Learn has no label.
     var learnPromptLabel: String { pendingLearnLabel }
@@ -107,6 +109,7 @@ final class AppModel: ObservableObject {
             self?.keyMaps.first { $0.buttonCode == code }
         }
         mapper.updateMaps(keyMaps)
+        startMetricsRecording()
         mapper.onRemotePointerActivity = { [weak self] in
             /* Mark sync first — avoid race where CGEvent → monitor hides overlay. */
             self?.pointerOverlay.markRemoteDriving()
@@ -223,6 +226,36 @@ final class AppModel: ObservableObject {
 
     func appendHint(_ msg: String) {
         host.log(.info, msg)
+    }
+
+    func logPerformanceMetrics() {
+        host.log(.matrix, PerformanceMetrics.shared.summary())
+    }
+
+    private func startMetricsRecording() {
+        let fm = FileManager.default
+        let base = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("MagicRemoteBLE", isDirectory: true)
+        try? fm.createDirectory(at: base, withIntermediateDirectories: true)
+        let url = base.appendingPathComponent("metrics.csv")
+        metricsURL = url
+        if !fm.fileExists(atPath: url.path) {
+            let header = "timestamp,rx_packets,rx_motion,rx_buttons,posted_motion,parse_errors,latency_avg_ms,latency_max_ms\n"
+            try? header.data(using: .utf8)?.write(to: url)
+        }
+        host.log(.info, "Metrics recording → \(url.path)")
+        metricsTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
+            self?.recordMetrics()
+        }
+    }
+
+    private func recordMetrics() {
+        guard let url = metricsURL else { return }
+        let line = "\(ISO8601DateFormatter().string(from: Date())),\(PerformanceMetrics.shared.csvLine())\n"
+        guard let data = line.data(using: .utf8), let handle = try? FileHandle(forWritingTo: url) else { return }
+        defer { try? handle.close() }
+        try? handle.seekToEnd()
+        try? handle.write(contentsOf: data)
     }
 
     func startLearn(label: String = "") {
