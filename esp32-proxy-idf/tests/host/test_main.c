@@ -1,0 +1,130 @@
+#include "bridge_packet.h"
+#include "bridge_state.h"
+#include "bridge_fault.h"
+#include "remote_decoder.h"
+#include "event_bus.h"
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+
+int event_bus_stub_count(void);
+void event_bus_stub_reset(void);
+
+static int g_fail;
+
+#define EXPECT(cond)                                                           \
+  do {                                                                         \
+    if (!(cond)) {                                                             \
+      fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond);          \
+      g_fail++;                                                                \
+    }                                                                          \
+  } while (0)
+
+static void test_packet_roundtrip(void) {
+  bridge_packet_t in = {0}, out = {0};
+  uint8_t buf[16];
+  in.type = PKT_MOTION;
+  in.seq = 7;
+  in.u.motion.dx = -12;
+  in.u.motion.dy = 34;
+  in.u.motion.buttons = 0;
+  in.u.motion.wheel = -1;
+  size_t n = bridge_packet_encode(&in, buf, sizeof(buf));
+  EXPECT(n == 9);
+  EXPECT(bridge_packet_validate(buf, n));
+  EXPECT(bridge_packet_parse(buf, n, &out));
+  EXPECT(out.type == PKT_MOTION && out.seq == 7);
+  EXPECT(out.u.motion.dx == -12 && out.u.motion.dy == 34);
+  EXPECT(out.u.motion.wheel == -1);
+
+  uint8_t bad[] = {0xFF, 0x00};
+  EXPECT(!bridge_packet_validate(bad, sizeof(bad)));
+  uint8_t trunc[] = {PKT_BUTTON, 1, 0x10}; /* missing bytes */
+  EXPECT(!bridge_packet_validate(trunc, sizeof(trunc)));
+
+  in.type = PKT_BUTTON;
+  in.u.button.code = 0x0040;
+  in.u.button.down = 1;
+  n = bridge_packet_encode(&in, buf, sizeof(buf));
+  EXPECT(n == 5);
+  EXPECT(bridge_packet_parse(buf, n, &out));
+  EXPECT(out.u.button.code == 0x0040 && out.u.button.down == 1);
+}
+
+static void test_bridge_state(void) {
+  bridge_state_init();
+  EXPECT(bridge_state_overall() == BRIDGE_WAIT_MAC);
+  bridge_state_set_mac(MAC_READY);
+  EXPECT(bridge_state_overall() == BRIDGE_WAIT_REMOTE);
+  bridge_state_set_remote(REM_WAIT_MAC);
+  EXPECT(bridge_state_overall() == BRIDGE_WAIT_REMOTE);
+  bridge_state_set_remote(REM_READY);
+  EXPECT(bridge_state_overall() == BRIDGE_STREAMING);
+  bridge_state_set_remote(REM_RECOVERING);
+  EXPECT(bridge_state_overall() == BRIDGE_RECOVERING);
+  uint32_t a = bridge_session_bump_mac();
+  uint32_t b = bridge_session_bump_mac();
+  EXPECT(b == a + 1);
+}
+
+static void test_decoder_buttons(void) {
+  event_bus_init();
+  event_bus_stub_reset();
+  remote_decoder_t *d = remote_decoder_create();
+  EXPECT(d != NULL);
+  remote_decoder_reset(d);
+
+  uint8_t fd[19] = {0};
+  fd[0] = 0xFD;
+  /* button BE at 16..17 */
+  fd[16] = 0x00;
+  fd[17] = 0x40;
+  fd[18] = 0;
+  remote_decoder_on_fd(d, fd, sizeof(fd));
+
+  bus_event_t ev;
+  int saw_down = 0;
+  while (event_bus_take(&ev, 0)) {
+    if (ev.type == BUS_BUTTON && ev.u.button.code == 0x0040 && ev.u.button.down)
+      saw_down = 1;
+  }
+  EXPECT(saw_down == 1);
+
+  fd[16] = fd[17] = 0;
+  remote_decoder_on_fd(d, fd, sizeof(fd));
+  int saw_up = 0;
+  while (event_bus_take(&ev, 0)) {
+    if (ev.type == BUS_BUTTON && ev.u.button.code == 0x0040 && !ev.u.button.down)
+      saw_up = 1;
+  }
+  EXPECT(saw_up == 1);
+
+  /* short frame rejected */
+  remote_decoder_on_fd(d, fd, 10);
+  EXPECT(event_bus_stub_count() == 0);
+  free(d);
+}
+
+static void test_fault_inject(void) {
+  bridge_fault_reset();
+  bridge_fault()->drop_next_tx = 2;
+  EXPECT(bridge_fault_should_drop_tx() == true);
+  EXPECT(bridge_fault_should_drop_tx() == true);
+  EXPECT(bridge_fault_should_drop_tx() == false);
+  bridge_fault()->force_tx_overflow = 1;
+  EXPECT(bridge_fault_should_overflow() == true);
+  EXPECT(bridge_fault_should_overflow() == false);
+}
+
+int main(void) {
+  test_packet_roundtrip();
+  test_bridge_state();
+  test_decoder_buttons();
+  test_fault_inject();
+  if (g_fail) {
+    fprintf(stderr, "%d assertion(s) failed\n", g_fail);
+    return 1;
+  }
+  printf("host_tests: OK\n");
+  return 0;
+}

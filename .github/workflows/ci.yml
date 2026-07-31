@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  firmware-pio:
+    name: PlatformIO firmware
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio/.cache
+            esp32-proxy-idf/.pio
+          key: pio-${{ runner.os }}-${{ hashFiles('esp32-proxy-idf/platformio.ini') }}
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install PlatformIO
+        run: pip install -U platformio
+      - name: Build firmware
+        working-directory: esp32-proxy-idf
+        run: pio run
+
+  host-tests:
+    name: Host unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build & run host tests
+        working-directory: esp32-proxy-idf/tests/host
+        run: make test
+
+  macos-xcode:
+    name: Xcode MagicRemoteBLE
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode.app || true
+      - name: Build (no signing)
+        run: |
+          xcodebuild \
+            -scheme MagicRemoteBLE \
+            -configuration Debug \
+            -destination 'platform=macOS' \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build

@@ -1,0 +1,23 @@
+.DS_Store
+DerivedData/
+build/
+*.xcuserstate
+xcuserdata/
+.vscode/
+.idea/
+
+# PlatformIO / ESP-IDF
+esp32-proxy-idf/.pio/
+esp32-proxy-idf/sdkconfig
+esp32-proxy-idf/sdkconfig.old
+esp32-proxy-idf/dependencies.lock
+**/managed_components/
+
+# Host test binaries
+esp32-proxy-idf/tests/host/build/
+*.o
+*.out
+
+# Logs / local
+*.log
+serial-debug.log

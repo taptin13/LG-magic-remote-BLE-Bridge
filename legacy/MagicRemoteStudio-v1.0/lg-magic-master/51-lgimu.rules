@@ -1,0 +1,2 @@
+SUBSYSTEM=="input", KERNEL=="event*", ATTRS{name}=="*IMU*", \
+    MODE="0660", GROUP="input", TAG+="uaccess"

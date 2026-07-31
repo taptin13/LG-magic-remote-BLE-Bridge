@@ -1,0 +1,46 @@
+// !$*UTF8*$!
+{
+ archiveVersion = 1;
+ classes = {};
+ objectVersion = 56;
+ objects = {
+  A00000000000000000000001 = {isa = PBXProject; attributes = {BuildIndependentTargetsInParallel = 1; LastSwiftUpdateCheck = 1600; LastUpgradeCheck = 1600;}; buildConfigurationList = A00000000000000000000002; compatibilityVersion = "Xcode 14.0"; developmentRegion = en; hasScannedForEncodings = 0; knownRegions = (en, Base); mainGroup = A00000000000000000000003; productRefGroup = A00000000000000000000004; projectDirPath = ""; projectRoot = ""; targets = (A00000000000000000000005); };
+  A00000000000000000000002 = {isa = XCConfigurationList; buildConfigurations = (A00000000000000000000020, A00000000000000000000021); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release;};
+  A00000000000000000000003 = {isa = PBXGroup; children = (A00000000000000000000006, A00000000000000000000004); sourceTree = "<group>";};
+  A00000000000000000000004 = {isa = PBXGroup; children = (A00000000000000000000007); name = Products; sourceTree = "<group>";};
+  A00000000000000000000005 = {isa = PBXNativeTarget; buildConfigurationList = A00000000000000000000008; buildPhases = (A00000000000000000000009, A0000000000000000000000A, A0000000000000000000000B); buildRules = (); dependencies = (); name = MagicRemoteStudio; productName = MagicRemoteStudio; productReference = A00000000000000000000007; productType = "com.apple.product-type.application";};
+  A00000000000000000000006 = {isa = PBXGroup; children = (A00000000000000000000030,A00000000000000000000031,A00000000000000000000032,A00000000000000000000033,A00000000000000000000034,A00000000000000000000035,A00000000000000000000036,A00000000000000000000037,A0000000000000000000003A,A0000000000000000000003B,A00000000000000000000038,A00000000000000000000039); path = MagicRemoteStudio; sourceTree = "<group>";};
+  A00000000000000000000007 = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MagicRemoteStudio.app; sourceTree = BUILT_PRODUCTS_DIR;};
+  A00000000000000000000008 = {isa = XCConfigurationList; buildConfigurations = (A00000000000000000000022,A00000000000000000000023); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release;};
+  A00000000000000000000009 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A00000000000000000000040,A00000000000000000000041,A00000000000000000000042,A00000000000000000000043,A00000000000000000000044,A00000000000000000000045,A00000000000000000000046,A00000000000000000000047,A00000000000000000000049,A0000000000000000000004A); runOnlyForDeploymentPostprocessing = 0;};
+  A0000000000000000000000A = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0;};
+  A0000000000000000000000B = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0;};
+  A00000000000000000000020 = {isa = XCBuildConfiguration; buildSettings = {ALWAYS_SEARCH_USER_PATHS = NO; CLANG_ENABLE_MODULES = YES; MACOSX_DEPLOYMENT_TARGET = 13.0; SDKROOT = macosx; SWIFT_VERSION = 5.0;}; name = Debug;};
+  A00000000000000000000021 = {isa = XCBuildConfiguration; buildSettings = {ALWAYS_SEARCH_USER_PATHS = NO; CLANG_ENABLE_MODULES = YES; MACOSX_DEPLOYMENT_TARGET = 13.0; SDKROOT = macosx; SWIFT_VERSION = 5.0;}; name = Release;};
+  A00000000000000000000022 = {isa = XCBuildConfiguration; buildSettings = {CODE_SIGN_STYLE = Automatic; COMBINE_HIDPI_IMAGES = YES; CURRENT_PROJECT_VERSION = 1; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = MagicRemoteStudio/Info.plist; LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks"; MACOSX_DEPLOYMENT_TARGET = 13.0; MARKETING_VERSION = 0.1; PRODUCT_BUNDLE_IDENTIFIER = com.vuong.magicremote.studio; PRODUCT_NAME = "$(TARGET_NAME)"; SWIFT_EMIT_LOC_STRINGS = YES; SWIFT_VERSION = 5.0;}; name = Debug;};
+  A00000000000000000000023 = {isa = XCBuildConfiguration; buildSettings = {CODE_SIGN_STYLE = Automatic; COMBINE_HIDPI_IMAGES = YES; CURRENT_PROJECT_VERSION = 1; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = MagicRemoteStudio/Info.plist; LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks"; MACOSX_DEPLOYMENT_TARGET = 13.0; MARKETING_VERSION = 0.1; PRODUCT_BUNDLE_IDENTIFIER = com.vuong.magicremote.studio; PRODUCT_NAME = "$(TARGET_NAME)"; SWIFT_EMIT_LOC_STRINGS = YES; SWIFT_VERSION = 5.0;}; name = Release;};
+  A00000000000000000000030 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MagicRemoteStudioApp.swift; sourceTree = "<group>";};
+  A00000000000000000000031 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>";};
+  A00000000000000000000032 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProtocolAnalyzer.swift; sourceTree = "<group>";};
+  A00000000000000000000033 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PacketRecorder.swift; sourceTree = "<group>";};
+  A00000000000000000000034 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BLEHost.swift; sourceTree = "<group>";};
+  A00000000000000000000035 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HandshakeEngine.swift; sourceTree = "<group>";};
+  A00000000000000000000036 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StudioModel.swift; sourceTree = "<group>";};
+  A00000000000000000000037 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>";};
+  A0000000000000000000003A = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SerialBridge.swift; sourceTree = "<group>";};
+  A0000000000000000000003B = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InputMapper.swift; sourceTree = "<group>";};
+  A00000000000000000000038 = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>";};
+  A00000000000000000000039 = {isa = PBXFileReference; lastKnownFileType = text; path = ../README.md; sourceTree = "<group>";};
+  A00000000000000000000040 = {isa = PBXBuildFile; fileRef = A00000000000000000000030;};
+  A00000000000000000000041 = {isa = PBXBuildFile; fileRef = A00000000000000000000031;};
+  A00000000000000000000042 = {isa = PBXBuildFile; fileRef = A00000000000000000000032;};
+  A00000000000000000000043 = {isa = PBXBuildFile; fileRef = A00000000000000000000033;};
+  A00000000000000000000044 = {isa = PBXBuildFile; fileRef = A00000000000000000000034;};
+  A00000000000000000000045 = {isa = PBXBuildFile; fileRef = A00000000000000000000035;};
+  A00000000000000000000046 = {isa = PBXBuildFile; fileRef = A00000000000000000000036;};
+  A00000000000000000000047 = {isa = PBXBuildFile; fileRef = A00000000000000000000037;};
+  A00000000000000000000049 = {isa = PBXBuildFile; fileRef = A0000000000000000000003A;};
+  A0000000000000000000004A = {isa = PBXBuildFile; fileRef = A0000000000000000000003B;};
+  A00000000000000000000048 = {isa = PBXBuildFile; fileRef = A00000000000000000000038;};
+}; rootObject = A00000000000000000000001;
+}
