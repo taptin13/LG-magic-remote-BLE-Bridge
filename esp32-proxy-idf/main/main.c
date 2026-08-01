@@ -76,6 +76,8 @@ static void on_mac_cmd(const uint8_t *data, uint16_t len) {
         }
       }
       break;
+    case 0x03: /* Mac link keepalive ping — no payload */
+      break;
     default:
       ESP_LOGW(TAG, "CMD unknown 0x%02X len=%u", data[0], len);
       break;
@@ -111,19 +113,23 @@ static void on_sync(void) {
 
 static void heartbeat_task(void *arg) {
   (void)arg;
+  unsigned n = 0;
   for (;;) {
     /* <15s: macOS Sequoia often drops idle BLE links with CBError 6
      * ("timed out unexpectedly") when there is no ATT traffic. */
-    vTaskDelay(pdMS_TO_TICKS(3000));
+    vTaskDelay(pdMS_TO_TICKS(2000));
+    n++;
     if (mac_gatt_mac_ready()) {
       /* Re-notify current status — keeps the Mac↔ESP ATT path alive while the
        * remote is quiet (no motion/button notifies). */
       mac_gatt_set_status(mac_gatt_current_status());
     }
-    ESP_LOGI(TAG, "HB overall=%s rem=%s mac=%d/%d", bridge_state_overall_name(),
-             remote_manager_state_name(), (int)mac_gatt_mac_connected(),
-             (int)mac_gatt_mac_ready());
-    bridge_metrics_log();
+    if ((n % 5u) == 0u) {
+      ESP_LOGI(TAG, "HB overall=%s rem=%s mac=%d/%d", bridge_state_overall_name(),
+               remote_manager_state_name(), (int)mac_gatt_mac_connected(),
+               (int)mac_gatt_mac_ready());
+      bridge_metrics_log();
+    }
   }
 }
 

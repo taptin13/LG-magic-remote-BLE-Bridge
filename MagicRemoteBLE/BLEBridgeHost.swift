@@ -53,6 +53,7 @@ final class BLEBridgeHost: NSObject, ObservableObject {
     /// Keep the CoreBluetooth link warm — Sequoia often drops idle centrals (~15s)
     /// with CBError 6 when the peripheral is quiet (no button/motion notifies).
     private var linkKeepAliveTimer: Timer?
+    private var linkKeepAliveTicks = 0
 
     override init() {
         super.init()
@@ -241,18 +242,24 @@ final class BLEBridgeHost: NSObject, ObservableObject {
 
     private func startLinkKeepAlive() {
         stopLinkKeepAlive()
-        let t = Timer.scheduledTimer(withTimeInterval: 4.0, repeats: true) { [weak self] _ in
+        linkKeepAliveTicks = 0
+        /* 2s ≪ Sequoia’s ~15s idle drop. Timer schedules on main; CB I/O must
+           run on `bleQueue` (the central’s queue) or reads/writes are ignored. */
+        let t = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.linkKeepAliveTick()
             }
         }
         RunLoop.main.add(t, forMode: .common)
         linkKeepAliveTimer = t
+        /* Immediate first ping — do not wait 2s after Ready. */
+        linkKeepAliveTick()
     }
 
     private func stopLinkKeepAlive() {
         linkKeepAliveTimer?.invalidate()
         linkKeepAliveTimer = nil
+        linkKeepAliveTicks = 0
     }
 
     private func linkKeepAliveTick() {
@@ -260,10 +267,23 @@ final class BLEBridgeHost: NSObject, ObservableObject {
             stopLinkKeepAlive()
             return
         }
-        /* readRSSI / status read → ATT traffic so macOS does not idle-drop the link. */
-        p.readRSSI()
-        if let statusChar {
-            p.readValue(for: statusChar)
+        let status = statusChar
+        let cmd = cmdChar
+        linkKeepAliveTicks += 1
+        let tick = linkKeepAliveTicks
+        bleQueue.async {
+            /* Central→peripheral traffic is what Sequoia needs to keep the link. */
+            if let cmd {
+                p.writeValue(Data([0x03]), for: cmd, type: .withResponse)
+            }
+            p.readRSSI()
+            if let status {
+                p.readValue(for: status)
+            }
+        }
+        /* Sparse log so we can confirm keepalive is alive without spam. */
+        if tick == 1 || tick % 15 == 0 {
+            log(.info, "Link keepalive #\(tick)")
         }
     }
 
@@ -296,8 +316,11 @@ final class BLEBridgeHost: NSObject, ObservableObject {
 
     func sendCommand(_ bytes: [UInt8]) {
         guard let p = active, let c = cmdChar, !bytes.isEmpty else { return }
-        /* .withResponse: surface errors when CMD requires encryption (pairing not finished). */
-        p.writeValue(Data(bytes), for: c, type: .withResponse)
+        let data = Data(bytes)
+        /* CBPeripheral I/O must use the central’s queue. */
+        bleQueue.async {
+            p.writeValue(data, for: c, type: .withResponse)
+        }
     }
 
     private func rememberPreferred(_ id: UUID) {
