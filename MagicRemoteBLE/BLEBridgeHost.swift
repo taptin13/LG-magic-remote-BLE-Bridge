@@ -50,6 +50,9 @@ final class BLEBridgeHost: NSObject, ObservableObject {
     /// Exponential reconnect backoff index (reset when `.ready`).
     private var reconnectAttempt = 0
     private static let reconnectBackoff: [TimeInterval] = [1, 2, 5, 10, 30]
+    /// Keep the CoreBluetooth link warm — Sequoia often drops idle centrals (~15s)
+    /// with CBError 6 when the peripheral is quiet (no button/motion notifies).
+    private var linkKeepAliveTimer: Timer?
 
     override init() {
         super.init()
@@ -104,6 +107,22 @@ final class BLEBridgeHost: NSObject, ObservableObject {
         reconnectAttempt = 0
         onPrefsChanged?()
         beginAutoConnect(reason: "reconnect")
+    }
+
+    /// Turning auto-connect off must also stop an in-flight scan, otherwise the radio
+    /// keeps scanning forever and the UI stays stuck on "Scanning…".
+    func setAutoConnect(_ on: Bool) {
+        autoConnect = on
+        onPrefsChanged?()
+        if on {
+            userStoppedAuto = false
+            reconnectAttempt = 0
+            beginAutoConnect(reason: "auto-connect on")
+        } else {
+            userStoppedAuto = true
+            stopScan()
+            log(.info, "Auto-connect off")
+        }
     }
 
     func beginAutoConnect(reason: String) {
@@ -206,6 +225,7 @@ final class BLEBridgeHost: NSObject, ObservableObject {
     }
 
     private func clearSession(phase next: Phase) {
+        stopLinkKeepAlive()
         connectionGeneration &+= 1
         active = nil
         eventChar = nil
@@ -217,6 +237,34 @@ final class BLEBridgeHost: NSObject, ObservableObject {
         sessionPeripheralID = nil
         sessionGeneration = connectionGeneration
         phase = next
+    }
+
+    private func startLinkKeepAlive() {
+        stopLinkKeepAlive()
+        let t = Timer.scheduledTimer(withTimeInterval: 4.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.linkKeepAliveTick()
+            }
+        }
+        RunLoop.main.add(t, forMode: .common)
+        linkKeepAliveTimer = t
+    }
+
+    private func stopLinkKeepAlive() {
+        linkKeepAliveTimer?.invalidate()
+        linkKeepAliveTimer = nil
+    }
+
+    private func linkKeepAliveTick() {
+        guard phase == .ready, let p = active else {
+            stopLinkKeepAlive()
+            return
+        }
+        /* readRSSI / status read → ATT traffic so macOS does not idle-drop the link. */
+        p.readRSSI()
+        if let statusChar {
+            p.readValue(for: statusChar)
+        }
     }
 
     private func isCurrentPeripheral(_ peripheral: CBPeripheral) -> Bool {
@@ -471,6 +519,7 @@ extension BLEBridgeHost: CBPeripheralDelegate {
             userStoppedAuto = false
             resetReconnectBackoff()
             phase = .ready
+            startLinkKeepAlive()
             log(.matrix, "Ready — Event notify OK")
         }
     }
@@ -483,8 +532,13 @@ extension BLEBridgeHost: CBPeripheralDelegate {
             let st = data[0]
             Task { @MainActor in
                 guard isCurrentPeripheral(peripheral) else { return }
-                remoteStatus = BridgeUUID.statusLabel(st)
-                log(.info, "ESP32 status: \(remoteStatus)")
+                let label = BridgeUUID.statusLabel(st)
+                let changed = remoteStatus != label
+                remoteStatus = label
+                /* Keepalive re-notifies the same status — do not spam the log. */
+                if changed {
+                    log(.info, "ESP32 status: \(remoteStatus)")
+                }
             }
             return
         }

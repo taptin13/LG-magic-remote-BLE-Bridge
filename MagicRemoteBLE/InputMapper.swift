@@ -8,14 +8,19 @@ final class InputMapper: ObservableObject {
     @Published var enabled = false
     @Published private(set) var trusted = false
     @Published private(set) var status = "off"
-    /// Air mouse: OK=L, Settings=R, Back=Mouse Back; motion only when enabled.
+    /// Air mouse: profile mouse bindings; motion only when enabled.
     @Published private(set) var mouseMode = false
+
+    /// User intent to map — kept even when Accessibility is temporarily unavailable.
+    private(set) var wantsEnabled = false
 
     var onLog: ((LogLevel, String) -> Void)?
     /// Current map lookup (provided by AppModel) — used only when cache is empty.
     var resolveMap: ((UInt16) -> KeyMapRow?)?
     /// Notify AppModel to show Magic pointer (only when remote is driving).
     var onRemotePointerActivity: (() -> Void)?
+    /// Sync mark only — must run before posting synthetic CGEvents (beats NSEvent monitors).
+    var onRemotePointerMark: (() -> Void)?
 
     private let lock = NSLock()
     private var heldKey: CGKeyCode?
@@ -36,9 +41,9 @@ final class InputMapper: ObservableObject {
     /// Cached map — avoids resolveMap hopping to MainActor from BLE queue (deadlock).
     private var mapCache: [UInt16: KeyMapRow] = [:]
 
-    private static let btnBack: UInt16 = 0x8028
-    private static let btnSettings: UInt16 = 0x8043
-    private static let btnOK: UInt16 = 0x8044
+    private var mouseLeftCode: UInt16? = 0x8044
+    private var mouseRightCode: UInt16? = 0x8043
+    private var mouseBackCode: UInt16? = 0x8028
 
     /// Click / scroll / key: remote is hard to hold still → temporarily freeze motion.
     /// hardLock = cannot break (prevents hand-shake accumulation). softFreeze = break on a strong swipe.
@@ -86,6 +91,31 @@ final class InputMapper: ObservableObject {
     private var lastPointerActivityAt: CFAbsoluteTime = 0
     private let smoothQueue = DispatchQueue(label: "mr.mouse.smooth", qos: .userInteractive)
 
+    /// High-precision cursor position. macOS quantizes the pointer to whole pixels, so
+    /// re-reading it every tick throws away the fraction of each sub-pixel step and slow
+    /// motion stalls completely. Carry the fraction here and resync only when something
+    /// else (physical mouse, another app) actually moved the pointer.
+    private var virtualPos = CGPoint.zero
+    private var virtualPosValid = false
+    private var lastMoveAt: CFAbsoluteTime = 0
+    /// After remote drop/reconnect (or long idle), WindowServer sometimes keeps
+    /// accepting CGEvent posts while the *visible* cursor stays frozen until a
+    /// real HID move. Track so the next remote motion can re-associate.
+    private var needsCursorResync = true
+    /// Last integer pixel we warpped to — avoid flooding WindowServer at 250Hz.
+    private var lastWarpPixel = CGPoint(x: -1, y: -1)
+    /// Updated from MainActor — Associate only works while frontmost; warp is the
+    /// reliable path for a menu-bar / accessory app.
+    private var appIsActiveFlag = false
+    private static let virtualResyncTolerance: Double = 2.0
+    private static let virtualResyncIdleSec: CFTimeInterval = 0.35
+
+    /// NSEvent timing properties are AppKit reads, but injection runs on the BLE and
+    /// repeat queues — cache them on the MainActor instead of touching AppKit there.
+    private var cachedKeyRepeatDelay: TimeInterval = 0.35
+    private var cachedKeyRepeatInterval: TimeInterval = 0.05
+    private var cachedDoubleClickInterval: TimeInterval = 0.5
+
     /// Adaptive tau by residual speed (low → smooth; fast → less lag).
     /// Match firmware MOTION_ACCUM_MAX — avoid clipping fast flicks on Mac side.
     private static let pendingMotionCap: Double = 2048
@@ -112,49 +142,113 @@ final class InputMapper: ObservableObject {
         0xF1: 0, 0xF2: 1, 0xF3: 7,
     ]
 
+    /// Refresh cached AppKit timings — must run on the MainActor.
+    @MainActor
+    func refreshSystemInputTimings() {
+        let repeatDelay = NSEvent.keyRepeatDelay
+        let repeatInterval = NSEvent.keyRepeatInterval
+        let doubleClick = NSEvent.doubleClickInterval
+        lock.lock()
+        cachedKeyRepeatDelay = repeatDelay > 0.05 ? repeatDelay : 0.35
+        cachedKeyRepeatInterval = repeatInterval > 0.01 ? repeatInterval : 0.05
+        cachedDoubleClickInterval = doubleClick > 0.05 ? doubleClick : 0.5
+        lock.unlock()
+    }
+
     @MainActor
     func refreshTrust() {
-        trusted = AXIsProcessTrusted()
-        trustedFlag = trusted
-        if enabled && !trusted { status = "needs Accessibility" }
+        refreshSystemInputTimings()
+        let ok = AXIsProcessTrusted()
+        trusted = ok
+        lock.lock()
+        trustedFlag = ok
+        lock.unlock()
+
+        if wantsEnabled {
+            if ok {
+                if !enabled {
+                    applyEnableIfTrusted(prompt: false)
+                }
+            } else if enabled {
+                /* Lost Accessibility while mapping — stop injection, keep intent. */
+                releaseAllInputs()
+                stopSmoothTimer()
+                enabled = false
+                lock.lock()
+                enabledFlag = false
+                lock.unlock()
+                status = "needs Accessibility"
+                onLog?(.error, "Accessibility revoked — Map stays ON, waiting for permission")
+            } else {
+                status = "needs Accessibility"
+            }
+        } else if enabled && !ok {
+            status = "needs Accessibility"
+        }
     }
 
     @MainActor
     func setEnabled(_ on: Bool) {
+        wantsEnabled = on
         if on {
-            let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
-            trusted = AXIsProcessTrustedWithOptions(opts)
-            trustedFlag = trusted
-            guard trusted else {
-                enabled = false
-                enabledFlag = false
-                status = "needs Accessibility"
-                onLog?(.error, "Enable Accessibility for MagicRemoteBLE")
-                return
-            }
-            enabled = true
-            enabledFlag = true
-            status = "mapping"
-            ensureSmoothTimer()
-            onLog?(.matrix, "Input ON — mapping from config")
+            applyEnableIfTrusted(prompt: true)
         } else {
             releaseAllInputs()
             stopSmoothTimer()
             enabled = false
+            lock.lock()
             enabledFlag = false
+            lock.unlock()
             status = "off"
         }
     }
 
+    @MainActor
+    private func applyEnableIfTrusted(prompt: Bool) {
+        let ok: Bool
+        if prompt {
+            let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+            ok = AXIsProcessTrustedWithOptions(opts)
+        } else {
+            ok = AXIsProcessTrusted()
+        }
+        trusted = ok
+        lock.lock()
+        trustedFlag = ok
+        lock.unlock()
+        guard ok else {
+            enabled = false
+            lock.lock()
+            enabledFlag = false
+            lock.unlock()
+            status = "needs Accessibility"
+            onLog?(.error, "Enable Accessibility for MagicRemoteBLE — will retry automatically")
+            return
+        }
+        enabled = true
+        lock.lock()
+        enabledFlag = true
+        lock.unlock()
+        status = "mapping"
+        ensureSmoothTimer()
+        onLog?(.matrix, "Input ON — mapping from config")
+    }
+
     func setMotionSmoothing(_ on: Bool) {
+        lock.lock()
         smoothingFlag = on
-        if on { ensureSmoothTimer() } else {
+        lock.unlock()
+        if on {
+            ensureSmoothTimer()
+        } else {
             flushPendingMotion()
         }
     }
 
     func setNativeScroll(_ on: Bool) {
+        lock.lock()
         nativeScrollFlag = on
+        lock.unlock()
     }
 
     /// Call from MainActor when keyMaps change.
@@ -169,17 +263,175 @@ final class InputMapper: ObservableObject {
 
     func setMouseMode(_ on: Bool) {
         lock.lock()
+        let wasOn = mouseModeFlag
         mouseModeFlag = on
+        /* Mode changes must drop click/freeze leftovers — otherwise a missed
+           button-up (or a scroll hard-lock that kept refreshing) swallows every
+           dx/dy until the user toggles Mouse a few times by luck. */
+        hardLockUntil = 0
+        softFreezeUntil = 0
+        postGateUntil = 0
+        coherentBreakAccum = 0
+        lastBreakDX = 0
+        lastBreakDY = 0
+        dragArmed = false
+        dragAccum = 0
+        clickSettleUntil = 0
+        pendingDX = 0
+        pendingDY = 0
+        pendingDragButton = nil
+        let stuckButtons = mouseButtons
         if !on {
-            pendingDX = 0
-            pendingDY = 0
-            pendingDragButton = nil
+            mouseButtons = 0
         }
         lock.unlock()
-        DispatchQueue.main.async { [weak self] in
-            self?.mouseMode = on
+
+        if !on, stuckButtons != 0 {
+            if (stuckButtons & 1) != 0 { mouseClick(button: .left, down: false) }
+            if (stuckButtons & 2) != 0 { mouseClick(button: .right, down: false) }
+            if (stuckButtons & 4) != 0 { mouseClick(button: .center, down: false) }
+            if (stuckButtons & 8) != 0 { mouseBack(down: false) }
         }
-        logAsync(.ok, on ? "Mouse mode ON — OK=L · Settings=R · Back=MouseBack" : "Mouse mode OFF — keys follow map")
+        if on {
+            ensureSmoothTimer()
+        }
+
+        let publish = { [weak self] in
+            guard let self else { return }
+            if self.mouseMode != on { self.mouseMode = on }
+        }
+        if Thread.isMainThread {
+            publish()
+        } else {
+            DispatchQueue.main.async(execute: publish)
+        }
+        if wasOn != on {
+            logAsync(.ok, on ? "Mouse mode ON — profile mouse bindings" : "Mouse mode OFF — keys follow map")
+        }
+    }
+
+    /// Flag used for prefs / UI — never the delayed `@Published` copy alone.
+    func isMouseModeEnabled() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return mouseModeFlag
+    }
+
+    /// Call after launch, window focus, or BLE Ready — clears stale freezes and
+    /// makes sure the smooth timer is alive so motion works without a Mouse toggle.
+    func reassertInputPipeline() {
+        lock.lock()
+        hardLockUntil = 0
+        softFreezeUntil = 0
+        postGateUntil = 0
+        coherentBreakAccum = 0
+        lastBreakDX = 0
+        lastBreakDY = 0
+        clickSettleUntil = 0
+        needsCursorResync = true
+        virtualPosValid = false
+        lastWarpPixel = CGPoint(x: -1, y: -1)
+        let mouseOn = mouseModeFlag
+        lock.unlock()
+        if Thread.isMainThread {
+            if mouseMode != mouseOn { mouseMode = mouseOn }
+            appIsActiveFlag = NSApp.isActive
+            wakeSystemCursor()
+        } else {
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                if self.mouseMode != mouseOn { self.mouseMode = mouseOn }
+                self.lock.lock()
+                self.appIsActiveFlag = NSApp.isActive
+                self.lock.unlock()
+                self.wakeSystemCursor()
+            }
+        }
+        ensureSmoothTimer()
+    }
+
+    @MainActor
+    func setAppActive(_ active: Bool) {
+        lock.lock()
+        appIsActiveFlag = active
+        if active {
+            needsCursorResync = true
+            lastWarpPixel = CGPoint(x: -1, y: -1)
+        }
+        lock.unlock()
+        if active { wakeSystemCursor() }
+    }
+
+    /// Mark cursor tracking dirty without releasing keys (remote session flap).
+    func invalidateCursorTracking() {
+        lock.lock()
+        needsCursorResync = true
+        virtualPosValid = false
+        pendingDX = 0
+        pendingDY = 0
+        pendingDragButton = nil
+        lastWarpPixel = CGPoint(x: -1, y: -1)
+        lock.unlock()
+    }
+
+    /// After the remote has been quiet, the next motion must re-associate the
+    /// system cursor — otherwise posts succeed but the visible pointer stays frozen
+    /// until the user clicks the app (which runs reassertInputPipeline).
+    func armCursorWakeIfIdle(seconds: CFTimeInterval) {
+        lock.lock()
+        let idle = lastMoveAt == 0 || (CFAbsoluteTimeGetCurrent() - lastMoveAt) >= seconds
+        if idle {
+            needsCursorResync = true
+            lastWarpPixel = CGPoint(x: -1, y: -1)
+        }
+        lock.unlock()
+    }
+
+    /// Re-associate / nudge the system cursor.
+    /// `CGAssociateMouseAndMouseCursorPosition` is documented to work only while the
+    /// app is frontmost — for menu-bar / accessory mode the reliable move is warp.
+    func wakeSystemCursor() {
+        let work = { [weak self] in
+            guard let self else { return }
+            let loc = CGEvent(source: nil)?.location ?? .zero
+            if let src = CGEventSource(stateID: .combinedSessionState) {
+                src.localEventsSuppressionInterval = 0
+            }
+            CGAssociateMouseAndMouseCursorPosition(1)
+            if loc.x.isFinite, loc.y.isFinite {
+                CGWarpMouseCursorPosition(CGPoint(x: loc.x + 1, y: loc.y))
+                CGAssociateMouseAndMouseCursorPosition(1)
+                CGWarpMouseCursorPosition(loc)
+                CGAssociateMouseAndMouseCursorPosition(1)
+            }
+            self.lock.lock()
+            self.virtualPos = loc
+            self.virtualPosValid = loc.x.isFinite && loc.y.isFinite
+            self.lastMoveAt = CFAbsoluteTimeGetCurrent()
+            self.needsCursorResync = false
+            self.lastWarpPixel = CGPoint(x: loc.x.rounded(), y: loc.y.rounded())
+            self.lock.unlock()
+        }
+        if Thread.isMainThread {
+            work()
+        } else {
+            /* Warp/Associate are unreliable off the main thread and from a
+               background accessory process — finish before the next post. */
+            let sem = DispatchSemaphore(value: 0)
+            DispatchQueue.main.async {
+                work()
+                sem.signal()
+            }
+            _ = sem.wait(timeout: .now() + .milliseconds(80))
+        }
+    }
+
+    func setMouseBindings(_ bindings: MouseButtonBindings) {
+        lock.lock()
+        mouseLeftCode = bindings.left
+        mouseRightCode = bindings.right
+        mouseBackCode = bindings.back
+        lock.unlock()
     }
 
     private func logAsync(_ level: LogLevel, _ msg: String) {
@@ -197,7 +449,13 @@ final class InputMapper: ObservableObject {
 
     /// Called from BLE queue (not MainActor) — mouse path takes priority.
     func handle(_ packet: BridgePacket) {
-        guard enabledFlag, trustedFlag else { return }
+        lock.lock()
+        let ok = enabledFlag && trustedFlag
+        lock.unlock()
+        guard ok else {
+            if packet.type == .motion { PerformanceMetrics.shared.motionSkipped() }
+            return
+        }
         switch packet.type {
         case .motion:
             defer { PerformanceMetrics.shared.motionHandled() }
@@ -215,11 +473,16 @@ final class InputMapper: ObservableObject {
         lock.lock()
         let mouseOn = mouseModeFlag
         let dragBtn = Self.dragButton(from: mouseButtons)
+        let smooth = smoothingFlag
+        let nativeScroll = nativeScrollFlag
         lock.unlock()
 
         if wheel != 0 {
+            /* Hold the pointer still while scrolling — same idea as click settle.
+               Firmware sends wheel on its own channel (dx/dy usually 0), so this
+               does not get refreshed by every gyro packet. */
             freezeMotion(hard: Self.scrollHardSec, soft: 0, postGate: false)
-            scroll(deltaY: Int32(wheel))
+            scroll(deltaY: Int32(wheel), native: nativeScroll)
         }
 
         /* Air mouse off → swallow dx/dy. */
@@ -234,7 +497,7 @@ final class InputMapper: ObservableObject {
             return
         }
 
-        if smoothingFlag {
+        if smooth {
             lock.lock()
             pendingDX = Self.clampPending(pendingDX + gated.dx)
             pendingDY = Self.clampPending(pendingDY + gated.dy)
@@ -263,7 +526,10 @@ final class InputMapper: ObservableObject {
         if down {
             beginClickHold()
             if inDoubleClickWindow() {
-                freezeMotion(hard: max(Self.clickHardSec, NSEvent.doubleClickInterval), soft: 0, postGate: false)
+                lock.lock()
+                let doubleClick = cachedDoubleClickInterval
+                lock.unlock()
+                freezeMotion(hard: max(Self.clickHardSec, doubleClick), soft: 0, postGate: false)
             } else {
                 freezeMotion(hard: Self.clickHardSec, soft: Self.clickSoftSec)
             }
@@ -274,29 +540,33 @@ final class InputMapper: ObservableObject {
         }
     }
 
-    /// Mouse mode: OK=L, Settings=R, Back=Mouse Back. Otherwise: normal map (+ Siri / Mouse toggle).
+    /// Mouse mode: profile mouseBindings. Otherwise: normal map (+ Siri / Mouse toggle).
     private func applyButton(code: UInt16, down: Bool) {
         lock.lock()
         let mouseOn = mouseModeFlag
+        let leftCode = mouseLeftCode
+        let rightCode = mouseRightCode
+        let backCode = mouseBackCode
         lock.unlock()
 
         if mouseOn {
-            switch code {
-            case Self.btnOK:
+            if let leftCode, code == leftCode {
                 setSyntheticMouseBit(1, down: down)
                 lock.lock()
                 let otherHeld = (mouseButtons & 0b110) != 0
                 lock.unlock()
                 handleClickEdge(button: .left, down: down, alsoEndHoldIfUp: !otherHeld)
                 return
-            case Self.btnSettings:
+            }
+            if let rightCode, code == rightCode {
                 setSyntheticMouseBit(2, down: down)
                 lock.lock()
                 let otherHeld = (mouseButtons & 0b101) != 0
                 lock.unlock()
                 handleClickEdge(button: .right, down: down, alsoEndHoldIfUp: !otherHeld)
                 return
-            case Self.btnBack:
+            }
+            if let backCode, code == backCode {
                 setSyntheticMouseBit(8, down: down)
                 mouseBack(down: down)
                 freezeMotion(
@@ -305,8 +575,6 @@ final class InputMapper: ObservableObject {
                     postGate: false
                 )
                 return
-            default:
-                break
             }
         }
 
@@ -320,23 +588,8 @@ final class InputMapper: ObservableObject {
             guard down else { return }
             lock.lock()
             let next = !mouseModeFlag
-            mouseModeFlag = next
-            let mb = mouseButtons
-            mouseButtons = 0
-            pendingDX = 0
-            pendingDY = 0
-            pendingDragButton = nil
             lock.unlock()
-            if (mb & 1) != 0 { mouseClick(button: .left, down: false) }
-            if (mb & 2) != 0 { mouseClick(button: .right, down: false) }
-            if (mb & 4) != 0 { mouseClick(button: .center, down: false) }
-            if (mb & 8) != 0 { mouseBack(down: false) }
-            if !next { discardPendingMotion() }
-            /* Async to main only — do not sync MainActor from BLE (avoids hang). */
-            DispatchQueue.main.async { [weak self] in
-                self?.mouseMode = next
-            }
-            logAsync(.ok, next ? "Mouse mode ON — OK=L · Settings=R · Back=MouseBack" : "Mouse mode OFF")
+            setMouseMode(next)
             return
         }
 
@@ -388,24 +641,15 @@ final class InputMapper: ObservableObject {
         }
     }
 
-    private static var systemKeyRepeatDelay: TimeInterval {
-        let d = NSEvent.keyRepeatDelay
-        return d > 0.05 ? d : 0.35
-    }
-
-    private static var systemKeyRepeatInterval: TimeInterval {
-        let i = NSEvent.keyRepeatInterval
-        return i > 0.01 ? i : 0.05
-    }
-
+    /// Both repeat timers are driven from the BLE queue but also torn down from the
+    /// MainActor (`releaseAllInputs`), so every field they touch stays under `lock`
+    /// and cancellation happens outside it.
     private func startKeyRepeat(vk: CGKeyCode, flags: CGEventFlags) {
-        stopKeyRepeat()
         lock.lock()
-        keyRepeatVK = vk
-        keyRepeatFlags = flags
+        let delay = cachedKeyRepeatDelay
+        let interval = cachedKeyRepeatInterval
         lock.unlock()
-        let delay = Self.systemKeyRepeatDelay
-        let interval = Self.systemKeyRepeatInterval
+
         let t = DispatchSource.makeTimerSource(queue: keyRepeatQueue)
         t.schedule(deadline: .now() + delay, repeating: interval, leeway: .milliseconds(4))
         t.setEventHandler { [weak self] in
@@ -419,40 +663,61 @@ final class InputMapper: ObservableObject {
             self.lock.unlock()
             self.key(code, down: true, flags: f, autorepeat: true)
         }
-        t.resume()
+
+        lock.lock()
+        let previous = keyRepeatTimer
         keyRepeatTimer = t
+        keyRepeatVK = vk
+        keyRepeatFlags = flags
+        lock.unlock()
+        previous?.cancel()
+        t.resume()
     }
 
     private func stopKeyRepeat() {
-        keyRepeatTimer?.cancel()
-        keyRepeatTimer = nil
         lock.lock()
+        let t = keyRepeatTimer
+        keyRepeatTimer = nil
         keyRepeatVK = nil
         keyRepeatFlags = []
         lock.unlock()
+        t?.cancel()
     }
 
     private func startMediaRepeat(_ media: Int32) {
-        stopMediaRepeat()
-        mediaRepeatKey = media
-        let delay = Self.systemKeyRepeatDelay
-        let interval = Self.systemKeyRepeatInterval
+        lock.lock()
+        let delay = cachedKeyRepeatDelay
+        let interval = cachedKeyRepeatInterval
+        lock.unlock()
+
         let t = DispatchSource.makeTimerSource(queue: keyRepeatQueue)
         t.schedule(deadline: .now() + delay, repeating: interval, leeway: .milliseconds(4))
         t.setEventHandler { [weak self] in
             guard let self else { return }
-            guard let m = self.mediaRepeatKey else { return }
+            self.lock.lock()
+            let m = self.mediaRepeatKey
+            self.lock.unlock()
+            guard let m else { return }
             self.postMedia(m, down: true)
             self.postMedia(m, down: false)
         }
-        t.resume()
+
+        lock.lock()
+        let previous = mediaRepeatTimer
         mediaRepeatTimer = t
+        mediaRepeatKey = media
+        lock.unlock()
+        previous?.cancel()
+        t.resume()
     }
 
     private func stopMediaRepeat() {
-        mediaRepeatTimer?.cancel()
+        lock.lock()
+        let t = mediaRepeatTimer
         mediaRepeatTimer = nil
         mediaRepeatKey = nil
+        lock.unlock()
+        t?.cancel()
     }
 
     private func setSyntheticMouseBit(_ bit: UInt16, down: Bool) {
@@ -462,25 +727,33 @@ final class InputMapper: ObservableObject {
     }
 
     private func ensureSmoothTimer() {
-        guard smoothingFlag, smoothTimer == nil else { return }
+        lock.lock()
+        let need = smoothingFlag && enabledFlag && smoothTimer == nil
+        guard need else {
+            lock.unlock()
+            return
+        }
         let t = DispatchSource.makeTimerSource(queue: smoothQueue)
         // 4 ms display-side cadence reduces motion quantization without a
         // MainActor hop; BLE motion already arrives through InputPacketSink.
         t.schedule(deadline: .now(), repeating: .milliseconds(4), leeway: .milliseconds(1))
         t.setEventHandler { [weak self] in self?.smoothTick() }
-        t.resume()
         smoothTimer = t
+        lock.unlock()
+        t.resume()
     }
 
     private func stopSmoothTimer() {
-        smoothTimer?.cancel()
-        smoothTimer = nil
         lock.lock()
+        let t = smoothTimer
+        smoothTimer = nil
         pendingDX = 0
         pendingDY = 0
         pendingDragButton = nil
         lastSmoothAt = 0
+        virtualPosValid = false
         lock.unlock()
+        t?.cancel()
     }
 
     private func flushPendingMotion() {
@@ -502,7 +775,10 @@ final class InputMapper: ObservableObject {
     }
 
     private func smoothTick() {
-        guard enabledFlag else { return }
+        lock.lock()
+        let enabled = enabledFlag
+        lock.unlock()
+        guard enabled else { return }
         lock.lock()
         let now = CFAbsoluteTimeGetCurrent()
         if now < hardLockUntil || now < softFreezeUntil {
@@ -556,10 +832,19 @@ final class InputMapper: ObservableObject {
             moveMouse(dx: outX, dy: outY, dragButton: drag)
         }
     }
-    private func scroll(deltaY: Int32) {
+    private func scroll(deltaY: Int32, native: Bool? = nil) {
         guard deltaY != 0 else { return }
+        notePointerActivity(forceShow: true)
+        let useNative: Bool
+        if let native {
+            useNative = native
+        } else {
+            lock.lock()
+            useNative = nativeScrollFlag
+            lock.unlock()
+        }
         /* Native (macOS) = inverted (Natural Scrolling). Off = Windows direction. */
-        let dy = nativeScrollFlag ? -deltaY : deltaY
+        let dy = useNative ? -deltaY : deltaY
         guard let ev = CGEvent(
             scrollWheelEvent2Source: nil,
             units: .line,
@@ -732,6 +1017,15 @@ final class InputMapper: ObservableObject {
         clickSettleUntil = 0
         pendingDragButton = nil
         lastSmoothAt = 0
+        virtualPosValid = false
+        needsCursorResync = true
+        hardLockUntil = 0
+        softFreezeUntil = 0
+        postGateUntil = 0
+        coherentBreakAccum = 0
+        lastBreakDX = 0
+        lastBreakDY = 0
+        clickSettleUntil = 0
         lock.unlock()
         if let vk { key(vk, down: false, flags: flags) }
         if (mb & 1) != 0 { mouseClick(button: .left, down: false) }
@@ -742,45 +1036,80 @@ final class InputMapper: ObservableObject {
 
     /// Cocoa global (bottom-left) spanning all displays.
     private static func desktopQuartzBounds() -> CGRect {
-        guard let primary = NSScreen.screens.first else { return .null }
+        var count: UInt32 = 0
+        CGGetActiveDisplayList(0, nil, &count)
+        guard count > 0 else { return .null }
+        var displays = [CGDirectDisplayID](repeating: 0, count: Int(count))
+        CGGetActiveDisplayList(count, &displays, &count)
         var bounds = CGRect.null
-        for s in NSScreen.screens {
-            // Quartz: origin = top-left primary; Y increases downward.
-            let top = primary.frame.maxY - s.frame.maxY
-            let r = CGRect(x: s.frame.minX, y: top, width: s.frame.width, height: s.frame.height)
-            bounds = bounds.union(r)
+        for id in displays.prefix(Int(count)) {
+            bounds = bounds.union(CGDisplayBounds(id))
         }
         return bounds
     }
 
-    /// Always flip using screens[0] (primary/menu bar) — do NOT use NSScreen.main (changes with focus).
-    private static func cocoaToQuartz(_ p: CGPoint) -> CGPoint {
-        guard let primary = NSScreen.screens.first else { return p }
-        return CGPoint(x: p.x, y: primary.frame.maxY - p.y)
+    /// Quartz-space pointer location. Prefers the sub-pixel accumulator so clicks land
+    /// exactly where motion left the pointer, and never reads AppKit off the MainActor.
+    private func currentQuartzLocation() -> CGPoint {
+        lock.lock()
+        let virtual = virtualPos
+        let usable = virtualPosValid
+            && CFAbsoluteTimeGetCurrent() - lastMoveAt <= Self.virtualResyncIdleSec
+        lock.unlock()
+        if usable { return virtual }
+        return CGEvent(source: nil)?.location ?? virtual
     }
 
-    private func notePointerActivity() {
+    private func notePointerActivity(forceShow: Bool = false) {
+        /* Sync mark first — synthetic clicks/scrolls hit our global monitors. */
+        onRemotePointerMark?()
         let now = CFAbsoluteTimeGetCurrent()
         lock.lock()
-        if now - lastPointerActivityAt < Self.pointerActivityMinInterval {
-            lock.unlock()
-            return
-        }
-        lastPointerActivityAt = now
+        let hop = forceShow || (now - lastPointerActivityAt >= Self.pointerActivityMinInterval)
+        if hop { lastPointerActivityAt = now }
         lock.unlock()
-        onRemotePointerActivity?()
+        if hop {
+            onRemotePointerActivity?()
+        }
     }
 
     private func moveMouse(dx: Double, dy: Double, dragButton: CGMouseButton?) {
         notePointerActivity()
-        let loc = NSEvent.mouseLocation
-        guard let primary = NSScreen.screens.first else { return }
-        var pos = CGPoint(x: loc.x + dx, y: (primary.frame.maxY - loc.y) + dy)
-        let desk = Self.desktopQuartzBounds()
-        if !desk.isNull && !desk.isInfinite {
-            pos.x = min(max(pos.x, desk.minX), desk.maxX - 1)
-            pos.y = min(max(pos.y, desk.minY), desk.maxY - 1)
+        guard dx.isFinite, dy.isFinite else { return }
+
+        lock.lock()
+        let idleGap = lastMoveAt == 0 || (CFAbsoluteTimeGetCurrent() - lastMoveAt) > 0.8
+        let mustWake = needsCursorResync || !virtualPosValid || idleGap
+        lock.unlock()
+        if mustWake {
+            wakeSystemCursor()
         }
+
+        /* CGEvent location is Quartz (Y down) and safe off MainActor — avoid NSEvent/NSScreen here. */
+        guard let probe = CGEvent(source: nil) else { return }
+        let actual = probe.location
+        let desk = Self.desktopQuartzBounds()
+        let now = CFAbsoluteTimeGetCurrent()
+
+        lock.lock()
+        let drifted =
+            abs(actual.x - virtualPos.x) > Self.virtualResyncTolerance
+            || abs(actual.y - virtualPos.y) > Self.virtualResyncTolerance
+        if !virtualPosValid || drifted || now - lastMoveAt > Self.virtualResyncIdleSec {
+            virtualPos = actual
+        }
+        virtualPos.x += dx
+        virtualPos.y += dy
+        if !desk.isNull && !desk.isInfinite {
+            virtualPos.x = min(max(virtualPos.x, desk.minX), desk.maxX - 1)
+            virtualPos.y = min(max(virtualPos.y, desk.minY), desk.maxY - 1)
+        }
+        virtualPosValid = true
+        lastMoveAt = now
+        let pos = virtualPos
+        let prevWarp = lastWarpPixel
+        lock.unlock()
+
         let type: CGEventType
         let button: CGMouseButton
         if let dragButton {
@@ -794,10 +1123,30 @@ final class InputMapper: ObservableObject {
             type = .mouseMoved
             button = .left
         }
+
+        /* Menu-bar / accessory apps are usually not frontmost.
+           CGEvent mouseMoved alone updates the event location but often leaves the
+           *visible* cursor stuck until a real HID move — matching the bug report.
+           Warp drives the on-screen cursor; mouseMoved still notifies apps. */
+        let pixel = CGPoint(x: pos.x.rounded(.toNearestOrAwayFromZero),
+                            y: pos.y.rounded(.toNearestOrAwayFromZero))
+        if pixel != prevWarp {
+            if let suppress = CGEventSource(stateID: .combinedSessionState) {
+                suppress.localEventsSuppressionInterval = 0
+            }
+            CGWarpMouseCursorPosition(pixel)
+            /* Cancels the default ~0.25s hardware-event suppression after warp. */
+            CGAssociateMouseAndMouseCursorPosition(1)
+            lock.lock()
+            lastWarpPixel = pixel
+            lock.unlock()
+        }
+
         let src = CGEventSource(stateID: .hidSystemState)
+        src?.localEventsSuppressionInterval = 0
         guard let ev = CGEvent(mouseEventSource: src, mouseType: type, mouseCursorPosition: pos, mouseButton: button) else { return }
-        ev.setIntegerValueField(.mouseEventDeltaX, value: Int64(dx))
-        ev.setIntegerValueField(.mouseEventDeltaY, value: Int64(dy))
+        ev.setIntegerValueField(.mouseEventDeltaX, value: Int64((pos.x - actual.x).rounded()))
+        ev.setIntegerValueField(.mouseEventDeltaY, value: Int64((pos.y - actual.y).rounded()))
         if type == .otherMouseDragged {
             ev.setIntegerValueField(.mouseEventButtonNumber, value: Int64(button.rawValue))
         }
@@ -805,14 +1154,15 @@ final class InputMapper: ObservableObject {
         PerformanceMetrics.shared.eventPosted()
     }
     private func mouseClick(button: CGMouseButton, down: Bool) {
-        let loc = NSEvent.mouseLocation
-        var pos = Self.cocoaToQuartz(loc)
+        /* Mark before posting — synthetic clicks hit our global monitors as mouseDown. */
+        notePointerActivity(forceShow: true)
+        var pos = currentQuartzLocation()
         let now = ProcessInfo.processInfo.systemUptime
 
         lock.lock()
         var count = mouseClickCount
         if down {
-            let interval = NSEvent.doubleClickInterval
+            let interval = cachedDoubleClickInterval
             let sameBtn = lastMouseDownButton.map { $0.rawValue == button.rawValue } ?? false
             let dist = hypot(pos.x - lastMouseDownQuartz.x, pos.y - lastMouseDownQuartz.y)
             if sameBtn, dist <= 10, (now - lastMouseDownUptime) <= interval {
@@ -844,8 +1194,8 @@ final class InputMapper: ObservableObject {
 
     /// Back button on mouse (XButton1 / buttonNumber 3) — browser Back, etc.
     private func mouseBack(down: Bool) {
-        let loc = NSEvent.mouseLocation
-        let pos = Self.cocoaToQuartz(loc)
+        notePointerActivity(forceShow: true)
+        let pos = currentQuartzLocation()
         let type: CGEventType = down ? .otherMouseDown : .otherMouseUp
         let src = CGEventSource(stateID: .hidSystemState)
         guard let ev = CGEvent(
@@ -868,7 +1218,17 @@ final class InputMapper: ObservableObject {
         ev?.post(tap: .cghidEventTap)
     }
 
+    /// `NSEvent.otherEvent` is the only way to build a system-defined media event, and
+    /// it is AppKit — hop to the MainActor instead of calling it from the BLE queue.
     private func postMedia(_ key: Int32, down: Bool) {
+        if Thread.isMainThread {
+            postMediaOnMain(key, down: down)
+        } else {
+            DispatchQueue.main.async { [weak self] in self?.postMediaOnMain(key, down: down) }
+        }
+    }
+
+    private func postMediaOnMain(_ key: Int32, down: Bool) {
         let keyCode = Int64(key)
         let keyState = down ? Int64(0xa) : Int64(0xb)
         let data1 = (keyCode << 16) | (keyState << 8)

@@ -1,17 +1,29 @@
 import Foundation
 import Combine
+import AppKit
 
 @MainActor
 final class AppModel: ObservableObject {
     var host = BLEBridgeHost()
     var mapper = InputMapper()
 
-    @Published var keyMaps: [KeyMapRow] = KeyMapRow.defaults
+    @Published var availableProfiles: [InputDeviceProfile] = []
+    @Published var activeProfileId: String = ProfileCatalog.defaultProfileID {
+        didSet {
+            guard !loadingPrefs, oldValue != activeProfileId else { return }
+            applyActiveProfile(loadMaps: true)
+            savePrefs()
+        }
+    }
+    @Published var keyMaps: [KeyMapRow] = []
     @Published var learnMode = false
     @Published var pendingLearnAssign: UInt16?
     @Published var lastButtonCode: UInt16 = 0
     @Published var lastButtonName = ""
 
+    var activeProfile: InputDeviceProfile {
+        ProfileCatalog.shared.resolve(id: activeProfileId)
+    }
     /// Airmouse defaults + UI ranges — single source of truth.
     /// Ranges stay inside firmware clamps (sens 0.005–0.5, thresh 20–2000, dead 0–200).
     enum Airmouse {
@@ -21,6 +33,9 @@ final class AppModel: ObservableObject {
         static let threshRange = 20.0...1000.0
         static let deadDefault = 28.0
         static let deadRange = 0.0...100.0
+        /// 0 = off, 1 = max hand-shake damping (firmware LPF + deadzone boost).
+        static let tremorDefault = 0.35
+        static let tremorRange = 0.0...1.0
     }
 
     /// Airmouse — sent to ESP via CMD 0x02.
@@ -31,6 +46,10 @@ final class AppModel: ObservableObject {
         didSet { if !loadingPrefs { schedulePushAirmouse() } }
     }
     @Published var softDead: Double = Airmouse.deadDefault {
+        didSet { if !loadingPrefs { schedulePushAirmouse() } }
+    }
+    /// Dampen light hand tremor while holding the remote.
+    @Published var tremorReduction: Double = Airmouse.tremorDefault {
         didSet { if !loadingPrefs { schedulePushAirmouse() } }
     }
 
@@ -95,24 +114,41 @@ final class AppModel: ObservableObject {
     private var lastPersistedMouseMode = false
     private var metricsTimer: Timer?
     private var metricsURL: URL?
+    /// Keeps the process out of App Nap while the bridge is Ready. Closing the
+    /// window puts us in `.accessory` with no visible UI — without this, macOS
+    /// naps the process after a few minutes of idle remote use and motion
+    /// stops until the user opens the window again.
+    private var bridgeActivity: NSObjectProtocol?
+    /// Renews the activity assertion and marks cursor dirty after idle gaps.
+    private var napGuardTimer: Timer?
 
     /// Label pending Learn (shown in UI) — empty if Learn has no label.
     var learnPromptLabel: String { pendingLearnLabel }
 
-    /// Display name for code (from keyMaps, no hard fallback before custom).
+    /// Display name for code (keyMaps → active profile catalog → hex).
     func displayName(for code: UInt16) -> String {
-        keyMaps.first { $0.buttonCode == code }?.buttonName ?? KeyMapRow.name(for: code)
+        keyMaps.first { $0.buttonCode == code }?.buttonName
+            ?? activeProfile.name(for: code)
     }
 
     init() {
         host.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &subs)
         mapper.objectWillChange.sink { [weak self] _ in
             self?.objectWillChange.send()
-            self?.syncPointerOverlay()
-            self?.persistMapperState()
+            /* objectWillChange fires in willSet, so the mapper still holds the old
+               values here — read them on the next hop or Mouse mode never persists. */
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    self?.syncPointerOverlay()
+                    self?.persistMapperState()
+                }
+            }
         }.store(in: &subs)
 
+        ProfileCatalog.shared.reload()
+        availableProfiles = ProfileCatalog.shared.profiles
         loadPrefs()
+        applyActiveProfile(loadMaps: false)
         pointerOverlay.size = Self.pointerHeight(for: pointerSizePreset)
         mapper.setMotionSmoothing(motionSmoothing)
         mapper.setNativeScroll(nativeScroll)
@@ -121,6 +157,9 @@ final class AppModel: ObservableObject {
         }
         mapper.updateMaps(keyMaps)
         startMetricsRecording()
+        mapper.onRemotePointerMark = { [weak self] in
+            self?.pointerOverlay.markRemoteDriving()
+        }
         mapper.onRemotePointerActivity = { [weak self] in
             /* Mark sync first — avoid race where CGEvent → monitor hides overlay. */
             self?.pointerOverlay.markRemoteDriving()
@@ -149,15 +188,73 @@ final class AppModel: ObservableObject {
         if savedMouseMode {
             mapper.setMouseMode(true)
         }
+        mapper.reassertInputPipeline()
+
+        /* TCC / Accessibility can lag right after launch — retry without user toggle. */
+        for delay in [0.4, 1.2, 3.0] as [TimeInterval] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                guard let self else { return }
+                self.mapper.refreshTrust()
+                self.mapper.reassertInputPipeline()
+                self.syncPointerOverlay()
+            }
+        }
+
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.mapper.setAppActive(true)
+                self?.mapper.refreshTrust()
+                self?.mapper.reassertInputPipeline()
+                self?.syncPointerOverlay()
+                self?.pointerOverlay.recoverAfterDisplayChange()
+            }
+        }
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didResignActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.mapper.setAppActive(false)
+            }
+        }
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.pointerOverlay.recoverAfterDisplayChange()
+            }
+        }
+        /* Pointer scaling is a WindowServer-wide setting — always undo it on quit. */
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.pointerOverlay.restoreSystemPointerSize()
+                self?.updateBridgeActivity(active: false)
+            }
+        }
 
         host.$phase
             .receive(on: RunLoop.main)
             .sink { [weak self] phase in
                 guard let self else { return }
+                self.updateBridgeActivity(active: phase == .ready)
                 if phase == .ready {
                     /* Retry: CMD requires encryption — pairing may finish after notify. */
                     self.pushAirmouseWithRetry(attemptsLeft: 4)
                     self.savePrefs()
+                    self.mapper.refreshTrust()
+                    self.mapper.reassertInputPipeline()
+                    self.syncPointerOverlay()
                 } else {
                     self.airmousePush?.cancel()
                     self.mapper.releaseAllInputs()
@@ -165,7 +262,87 @@ final class AppModel: ObservableObject {
             }
             .store(in: &subs)
 
+        /* Remote drop → reconnect while Mac stays Ready: status char flips
+           "remote dropped" → "ready". Wake the system cursor so airmouse works
+           without jiggling a physical mouse first. */
+        host.$remoteStatus
+            .receive(on: RunLoop.main)
+            .sink { [weak self] status in
+                guard let self else { return }
+                if status == "ready" {
+                    self.mapper.reassertInputPipeline()
+                } else if status == "remote dropped" || status == "scan remote"
+                    || status == "remote connecting"
+                {
+                    self.mapper.invalidateCursorTracking()
+                }
+            }
+            .store(in: &subs)
+
+        NotificationCenter.default.addObserver(
+            forName: NSWorkspace.didWakeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.mapper.refreshTrust()
+                self?.mapper.reassertInputPipeline()
+                self?.syncPointerOverlay()
+                self?.pointerOverlay.recoverAfterDisplayChange()
+                /* BLE may still report Ready after sleep while the radio is quiet —
+                   nudge auto-reconnect if the session is gone. */
+                if self?.host.phase != .ready {
+                    self?.host.beginAutoConnect(reason: "system wake")
+                }
+            }
+        }
+
         syncPointerOverlay()
+        updateBridgeActivity(active: host.phase == .ready)
+    }
+
+    private func updateBridgeActivity(active: Bool) {
+        if active {
+            if bridgeActivity == nil {
+                /* `.userInitiated` (not AllowingIdleSystemSleep) pairs with
+                   NSAppSleepDisabled — accessory menu-bar apps are App Nap magnets. */
+                bridgeActivity = ProcessInfo.processInfo.beginActivity(
+                    options: [.userInitiated, .latencyCritical],
+                    reason: "MagicRemoteBLE bridge Ready — receive airmouse motion"
+                )
+            }
+            if napGuardTimer == nil {
+                let t = Timer.scheduledTimer(withTimeInterval: 8, repeats: true) { [weak self] _ in
+                    DispatchQueue.main.async {
+                        MainActor.assumeIsolated {
+                            self?.napGuardTick()
+                        }
+                    }
+                }
+                RunLoop.main.add(t, forMode: .common)
+                napGuardTimer = t
+            }
+        } else {
+            if let bridgeActivity {
+                ProcessInfo.processInfo.endActivity(bridgeActivity)
+                self.bridgeActivity = nil
+            }
+            napGuardTimer?.invalidate()
+            napGuardTimer = nil
+        }
+    }
+
+    private func napGuardTick() {
+        guard host.phase == .ready else {
+            updateBridgeActivity(active: false)
+            return
+        }
+        /* Keep the assertion alive and arm cursor wake for the next remote packet
+           after a quiet spell — same effect as clicking the app window. */
+        if bridgeActivity == nil {
+            updateBridgeActivity(active: true)
+        }
+        mapper.armCursorWakeIfIdle(seconds: 3)
     }
 
     func syncPointerOverlay() {
@@ -182,8 +359,10 @@ final class AppModel: ObservableObject {
         bytes += Self.floatLE(Float(sensitivity))
         bytes += Self.floatLE(Float(threshold))
         bytes += Self.floatLE(Float(softDead))
+        bytes += Self.floatLE(Float(tremorReduction))
         host.sendCommand(bytes)
-        host.log(.ok, String(format: "Airmouse sens=%.3f thresh=%.0f dead=%.0f", sensitivity, threshold, softDead))
+        host.log(.ok, String(format: "Airmouse sens=%.3f thresh=%.0f dead=%.0f tremor=%.0f%%",
+                             sensitivity, threshold, softDead, tremorReduction * 100))
     }
 
     private func pushAirmouseWithRetry(attemptsLeft: Int) {
@@ -202,6 +381,7 @@ final class AppModel: ObservableObject {
         sensitivity = Airmouse.sensDefault
         threshold = Airmouse.threshDefault
         softDead = Airmouse.deadDefault
+        tremorReduction = Airmouse.tremorDefault
         pushAirmouseNow()
         host.log(.ok, "Airmouse reset to defaults")
     }
@@ -223,7 +403,7 @@ final class AppModel: ObservableObject {
         if packet.type == .button {
             if packet.buttonDown {
                 lastButtonCode = packet.buttonCode
-                lastButtonName = KeyMapRow.name(for: packet.buttonCode)
+                lastButtonName = displayName(for: packet.buttonCode)
                 if learnMode {
                     finishLearn(code: packet.buttonCode)
                 }
@@ -247,29 +427,53 @@ final class AppModel: ObservableObject {
         let fm = FileManager.default
         let base = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("MagicRemoteBLE", isDirectory: true)
-        try? fm.createDirectory(at: base, withIntermediateDirectories: true)
+        _ = try? fm.createDirectory(at: base, withIntermediateDirectories: true)
         let url = base.appendingPathComponent("metrics.csv")
         metricsURL = url
         if !fm.fileExists(atPath: url.path) {
-            let header = "timestamp,rx_packets,rx_motion,rx_buttons,posted_motion,parse_errors,latency_avg_ms,latency_max_ms\n"
-            try? header.data(using: .utf8)?.write(to: url)
+            _ = try? Self.metricsHeader.data(using: .utf8)?.write(to: url, options: .atomic)
         }
         host.log(.info, "Metrics recording → \(url.path)")
         metricsTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                self?.recordMetrics()
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    self?.recordMetrics()
+                }
             }
+        }
+        if let metricsTimer {
+            RunLoop.main.add(metricsTimer, forMode: .common)
         }
     }
 
+    private static let metricsHeader =
+        "timestamp,rx_packets,rx_motion,rx_buttons,posted_motion,parse_errors,latency_avg_ms,latency_max_ms\n"
+    /// A row every 5s runs forever — roll over instead of growing without bound.
+    private static let metricsMaxBytes: UInt64 = 5 * 1024 * 1024
+
     private func recordMetrics() {
         guard let url = metricsURL else { return }
-        let line = "\(ISO8601DateFormatter().string(from: Date())),\(PerformanceMetrics.shared.csvLine())\n"
-        guard let data = line.data(using: .utf8), let handle = try? FileHandle(forWritingTo: url) else { return }
-        defer { try? handle.close() }
+        let line = "\(Self.metricsTimestampFormatter.string(from: Date())),\(PerformanceMetrics.shared.csvLine())\n"
+        guard let data = line.data(using: .utf8) else { return }
+        rotateMetricsIfNeeded(url: url)
+        guard let handle = try? FileHandle(forWritingTo: url) else { return }
+        defer { _ = try? handle.close() }
         _ = try? handle.seekToEnd()
-        try? handle.write(contentsOf: data)
+        _ = try? handle.write(contentsOf: data)
     }
+
+    private func rotateMetricsIfNeeded(url: URL) {
+        let fm = FileManager.default
+        guard let size = (try? fm.attributesOfItem(atPath: url.path)[.size]) as? UInt64,
+              size > Self.metricsMaxBytes else { return }
+        let archive = url.deletingPathExtension().appendingPathExtension("1.csv")
+        try? fm.removeItem(at: archive)
+        try? fm.moveItem(at: url, to: archive)
+        _ = try? Self.metricsHeader.data(using: .utf8)?.write(to: url, options: .atomic)
+        host.log(.info, "Metrics rolled over → \(archive.lastPathComponent)")
+    }
+
+    private static let metricsTimestampFormatter = ISO8601DateFormatter()
 
     func startLearn(label: String = "") {
         learnTimeout?.cancel()
@@ -304,7 +508,7 @@ final class AppModel: ObservableObject {
         learnMode = false
         pendingLearnAssign = code
         let learnedLabel = pendingLearnLabel
-        let name = learnedLabel.isEmpty ? KeyMapRow.name(for: code) : learnedLabel
+        let name = learnedLabel.isEmpty ? displayName(for: code) : learnedLabel
         pendingLearnLabel = ""
         if let idx = keyMaps.firstIndex(where: { $0.buttonCode == code }) {
             if !learnedLabel.isEmpty { keyMaps[idx].buttonName = name }
@@ -340,7 +544,7 @@ final class AppModel: ObservableObject {
 
     func setPreset(for code: UInt16, preset: HIDKeyPresets) {
         let (mod, key) = preset.modKey
-        let name = keyMaps.first { $0.buttonCode == code }?.buttonName ?? KeyMapRow.name(for: code)
+        let name = keyMaps.first { $0.buttonCode == code }?.buttonName ?? displayName(for: code)
         applyMap(KeyMapRow(
             buttonCode: code,
             buttonName: name,
@@ -352,10 +556,39 @@ final class AppModel: ObservableObject {
     }
 
     func resetMaps() {
-        keyMaps = KeyMapRow.defaults
+        keyMaps = activeProfile.defaultKeyMapRows()
         mapper.updateMaps(keyMaps)
         savePrefs()
-        host.log(.ok, "Map reset to MR25GA defaults")
+        host.log(.ok, "Map reset to \(activeProfile.displayName) defaults")
+    }
+
+    func selectProfile(id: String) {
+        guard availableProfiles.contains(where: { $0.id == id }) else { return }
+        activeProfileId = id
+    }
+
+    func reloadProfiles() {
+        ProfileCatalog.shared.reload()
+        availableProfiles = ProfileCatalog.shared.profiles
+        applyActiveProfile(loadMaps: true)
+        host.log(.info, "Profiles: \(availableProfiles.map(\.id).joined(separator: ", "))")
+    }
+
+    /// Apply catalog + mouse bindings; optionally reload keymaps for the profile.
+    private func applyActiveProfile(loadMaps: Bool) {
+        let profile = activeProfile
+        activeProfileId = profile.id
+        mapper.setMouseBindings(MouseButtonBindings(from: profile))
+        if loadMaps {
+            keyMaps = loadKeyMaps(for: profile.id) ?? profile.defaultKeyMapRows()
+            mergeDefaultKeyMapRows()
+        } else if keyMaps.isEmpty {
+            keyMaps = profile.defaultKeyMapRows()
+            mergeDefaultKeyMapRows()
+        } else {
+            mergeDefaultKeyMapRows()
+        }
+        mapper.updateMaps(keyMaps)
     }
 
     func ensureMapRow(code: UInt16, name: String) {
@@ -372,13 +605,14 @@ final class AppModel: ObservableObject {
         savePrefs()
     }
 
-    /// Sync names and add new buttons from defaults (keep user-assigned maps).
+    /// Sync names and add new buttons from active profile defaults (keep user-assigned maps).
     private func mergeDefaultKeyMapRows() {
+        let defaults = activeProfile.defaultKeyMapRows()
         var byCode = Dictionary(uniqueKeysWithValues: keyMaps.map { ($0.buttonCode, $0) })
-        for def in KeyMapRow.defaults {
+        for def in defaults {
             if var existing = byCode[def.buttonCode] {
                 existing.buttonName = def.buttonName
-                /* Fix Vol± if old map used wrong media key. */
+                /* Fix Vol± if old map used wrong media key (MR25GA legacy). */
                 if def.buttonCode == 0x8002, existing.key == 0xF2 { existing.key = 0xF1 }
                 if def.buttonCode == 0x8003, existing.key == 0xF1 { existing.key = 0xF2 }
                 /* Default AI to Siri if not assigned. */
@@ -391,11 +625,37 @@ final class AppModel: ObservableObject {
                 byCode[def.buttonCode] = def
             }
         }
-        keyMaps = KeyMapRow.defaults.compactMap { byCode[$0.buttonCode] }
+        keyMaps = defaults.compactMap { byCode[$0.buttonCode] }
             + byCode.values
-            .filter { row in !KeyMapRow.defaults.contains(where: { $0.buttonCode == row.buttonCode }) }
+            .filter { row in !defaults.contains(where: { $0.buttonCode == row.buttonCode }) }
             .sorted { $0.buttonCode < $1.buttonCode }
         mapper.updateMaps(keyMaps)
+    }
+
+    private func keymapsPrefKey(for profileId: String) -> String {
+        "\(PrefKey.keymapsPrefix).\(profileId)"
+    }
+
+    private func loadKeyMaps(for profileId: String) -> [KeyMapRow]? {
+        let d = UserDefaults.standard
+        let key = keymapsPrefKey(for: profileId)
+        if let data = d.data(forKey: key),
+           let rows = try? JSONDecoder().decode([KeyMapRow].self, from: data),
+           !rows.isEmpty {
+            return rows
+        }
+        return nil
+    }
+
+    private func saveKeyMaps() {
+        let d = UserDefaults.standard
+        if let data = try? JSONEncoder().encode(keyMaps) {
+            d.set(data, forKey: keymapsPrefKey(for: activeProfileId))
+            /* Keep legacy key in sync for older builds while on default profile. */
+            if activeProfileId == ProfileCatalog.defaultProfileID {
+                d.set(data, forKey: PrefKey.keymapsLegacy)
+            }
+        }
     }
 
     func saveConnectionPrefs() {
@@ -404,8 +664,9 @@ final class AppModel: ObservableObject {
 
     private func persistMapperState() {
         guard !loadingPrefs else { return }
-        let en = mapper.enabled
-        let mouse = mapper.mouseMode
+        /* Persist user intent, not trust-failed transient off. */
+        let en = mapper.wantsEnabled
+        let mouse = mapper.isMouseModeEnabled()
         guard en != lastPersistedMapEnabled || mouse != lastPersistedMouseMode else { return }
         lastPersistedMapEnabled = en
         lastPersistedMouseMode = mouse
@@ -414,18 +675,18 @@ final class AppModel: ObservableObject {
 
     private func savePrefs() {
         let d = UserDefaults.standard
-        if let data = try? JSONEncoder().encode(keyMaps) {
-            d.set(data, forKey: PrefKey.keymaps)
-        }
+        saveKeyMaps()
+        d.set(activeProfileId, forKey: PrefKey.activeProfile)
         d.set(sensitivity, forKey: PrefKey.sens)
         d.set(threshold, forKey: PrefKey.thresh)
         d.set(softDead, forKey: PrefKey.dead)
+        d.set(tremorReduction, forKey: PrefKey.tremor)
         d.set(largePointer, forKey: PrefKey.largePointer)
         d.set(pointerSizePreset, forKey: PrefKey.pointerPreset)
         d.set(motionSmoothing, forKey: PrefKey.smooth)
         d.set(nativeScroll, forKey: PrefKey.nativeScroll)
-        d.set(mapper.enabled, forKey: PrefKey.mapEnabled)
-        d.set(mapper.mouseMode, forKey: PrefKey.mouseMode)
+        d.set(mapper.wantsEnabled, forKey: PrefKey.mapEnabled)
+        d.set(mapper.isMouseModeEnabled(), forKey: PrefKey.mouseMode)
         d.set(host.autoConnect, forKey: PrefKey.autoConnect)
         if let id = host.preferredPeripheralID {
             d.set(id.uuidString, forKey: PrefKey.preferredPeripheral)
@@ -452,6 +713,9 @@ final class AppModel: ObservableObject {
         }
         if d.object(forKey: PrefKey.dead) != nil {
             softDead = d.double(forKey: PrefKey.dead).clamped(to: Airmouse.deadRange)
+        }
+        if d.object(forKey: PrefKey.tremor) != nil {
+            tremorReduction = d.double(forKey: PrefKey.tremor).clamped(to: Airmouse.tremorRange)
         }
         if d.object(forKey: PrefKey.largePointer) != nil {
             largePointer = d.bool(forKey: PrefKey.largePointer)
@@ -484,19 +748,43 @@ final class AppModel: ObservableObject {
         }
         host.configure(preferredID: preferred, autoConnect: auto)
 
-        if let data = d.data(forKey: PrefKey.keymaps),
-           let rows = try? JSONDecoder().decode([KeyMapRow].self, from: data),
-           !rows.isEmpty {
+        migrateLegacyKeymapsIfNeeded(defaults: d)
+
+        if let id = d.string(forKey: PrefKey.activeProfile),
+           ProfileCatalog.shared.profile(id: id) != nil {
+            activeProfileId = id
+        } else {
+            activeProfileId = ProfileCatalog.defaultProfileID
+        }
+
+        if let rows = loadKeyMaps(for: activeProfileId) {
             keyMaps = rows
-            mergeDefaultKeyMapRows()
+        } else {
+            keyMaps = activeProfile.defaultKeyMapRows()
+        }
+        mergeDefaultKeyMapRows()
+    }
+
+    /// Copy legacy `mrble.keymaps` → `mrble.keymaps.lg-mr25ga` once.
+    private func migrateLegacyKeymapsIfNeeded(defaults d: UserDefaults) {
+        let scoped = keymapsPrefKey(for: ProfileCatalog.defaultProfileID)
+        guard d.data(forKey: scoped) == nil,
+              let legacy = d.data(forKey: PrefKey.keymapsLegacy),
+              (try? JSONDecoder().decode([KeyMapRow].self, from: legacy)) != nil else { return }
+        d.set(legacy, forKey: scoped)
+        if d.string(forKey: PrefKey.activeProfile) == nil {
+            d.set(ProfileCatalog.defaultProfileID, forKey: PrefKey.activeProfile)
         }
     }
 
     private enum PrefKey {
-        static let keymaps = "mrble.keymaps"
+        static let keymapsLegacy = "mrble.keymaps"
+        static let keymapsPrefix = "mrble.keymaps"
+        static let activeProfile = "mrble.activeProfile"
         static let sens = "mrble.sens"
         static let thresh = "mrble.thresh"
         static let dead = "mrble.dead"
+        static let tremor = "mrble.tremor"
         static let largePointer = "mrble.largePointer"
         static let pointerPreset = "mrble.pointerPreset"
         static let smooth = "mrble.smooth"

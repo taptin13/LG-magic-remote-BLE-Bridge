@@ -93,13 +93,15 @@ static void refresh_ready(void) {
         .itvl_min = MAC_CONN_ITVL_MIN,
         .itvl_max = MAC_CONN_ITVL_MAX,
         .latency = 0,
-        .supervision_timeout = 400,
+        .supervision_timeout = MAC_CONN_SUPERVISION,
         .min_ce_len = 0,
         .max_ce_len = 0,
     };
-    ESP_LOGI(TAG, "request Mac CI itvl=%u..%u (×1.25ms)", up.itvl_min, up.itvl_max);
+    ESP_LOGI(TAG, "request Mac CI itvl=%u..%u (×1.25ms) supervision=%u",
+             up.itvl_min, up.itvl_max, up.supervision_timeout);
     ble_core_cmd_gap_update(s_conn, &up);
-    mac_gatt_set_status(ST_SCAN_REMOTE);
+    /* remote_manager owns ST_* once Mac is ready — do not force "scan remote"
+     * (misleading when the remote link is already up). */
   }
 }
 
@@ -313,6 +315,10 @@ bool mac_gatt_mac_connected(void) {
 
 bool mac_gatt_mac_ready(void) {
   return s_ready;
+}
+
+uint8_t mac_gatt_current_status(void) {
+  return s_status;
 }
 
 uint32_t mac_gatt_link_gen(void) {

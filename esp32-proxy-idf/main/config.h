@@ -38,6 +38,11 @@
 #ifndef MAC_CONN_ITVL_MAX
 #define MAC_CONN_ITVL_MAX 12
 #endif
+/* Supervision timeout units = 10ms. Dual-role (Mac + remote) can miss a few
+ * connection events; 400 (=4s) was too tight → Mac CBError 6 after idle. */
+#ifndef MAC_CONN_SUPERVISION
+#define MAC_CONN_SUPERVISION 1000 /* 10s */
+#endif
 
 /* LG vendor service 0000D1FF-3C17-D293-8E48-14FE2E4DA212 (LE bytes) */
 #define REMOTE_D1FF_UUID128 \

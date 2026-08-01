@@ -39,7 +39,7 @@ static void on_mac_cmd(const uint8_t *data, uint16_t len) {
       remote_decoder_reset(s_dec);
       ESP_LOGI(TAG, "CMD calib");
       break;
-    case 0x02: /* sens + thresh + dead (3× float32 LE) */
+    case 0x02: /* sens + thresh + dead [+ tremor] (3–4× float32 LE) */
       if (len >= 13) {
         float sens, thresh, dead;
         memcpy(&sens, data + 1, 4);
@@ -56,7 +56,24 @@ static void on_mac_cmd(const uint8_t *data, uint16_t len) {
         if (dead < 0.f) dead = 0.f;
         if (dead > 200.f) dead = 200.f;
         remote_decoder_set_sens(s_dec, sens, thresh, dead);
-        ESP_LOGI(TAG, "CMD sens=%.4f thresh=%.0f dead=%.0f", sens, thresh, dead);
+        float tremor = -1.f;
+        if (len >= 17) {
+          memcpy(&tremor, data + 13, 4);
+          if (!isfinite(tremor)) {
+            ESP_LOGW(TAG, "CMD tremor reject non-finite");
+            tremor = -1.f;
+          } else {
+            if (tremor < 0.f) tremor = 0.f;
+            if (tremor > 1.f) tremor = 1.f;
+            remote_decoder_set_tremor(s_dec, tremor);
+          }
+        }
+        if (tremor >= 0.f) {
+          ESP_LOGI(TAG, "CMD sens=%.4f thresh=%.0f dead=%.0f tremor=%.2f", sens, thresh, dead,
+                   tremor);
+        } else {
+          ESP_LOGI(TAG, "CMD sens=%.4f thresh=%.0f dead=%.0f", sens, thresh, dead);
+        }
       }
       break;
     default:
@@ -95,7 +112,14 @@ static void on_sync(void) {
 static void heartbeat_task(void *arg) {
   (void)arg;
   for (;;) {
-    vTaskDelay(pdMS_TO_TICKS(5000));
+    /* <15s: macOS Sequoia often drops idle BLE links with CBError 6
+     * ("timed out unexpectedly") when there is no ATT traffic. */
+    vTaskDelay(pdMS_TO_TICKS(3000));
+    if (mac_gatt_mac_ready()) {
+      /* Re-notify current status — keeps the Mac↔ESP ATT path alive while the
+       * remote is quiet (no motion/button notifies). */
+      mac_gatt_set_status(mac_gatt_current_status());
+    }
     ESP_LOGI(TAG, "HB overall=%s rem=%s mac=%d/%d", bridge_state_overall_name(),
              remote_manager_state_name(), (int)mac_gatt_mac_connected(),
              (int)mac_gatt_mac_ready());

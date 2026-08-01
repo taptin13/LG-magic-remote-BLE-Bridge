@@ -7,7 +7,9 @@ struct MagicRemoteBLEApp: App {
     @StateObject private var model = AppModel()
 
     var body: some Scene {
-        WindowGroup(id: AppWindowID.main) {
+        /* `Window`, not `WindowGroup`: a group is a multi-window scene, so `openWindow`
+           spawns a new window on every call instead of focusing the existing one. */
+        Window("MagicRemoteBLE", id: AppWindowID.main) {
             ContentView()
                 .environmentObject(model)
         }

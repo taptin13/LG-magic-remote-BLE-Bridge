@@ -84,7 +84,9 @@ static int64_t now_ms(void) { return esp_timer_get_time() / 1000; }
 static void reset_motion_session(void) {
   event_bus_reset_motion();
   ble_core_drop_motion();
-  if (s_dec) remote_decoder_reset(s_dec);
+  /* Soft reset keeps gyro bias — hard reset made airmouse dead until the
+   * remote was held still (~0.6s+), while buttons/scroll still worked. */
+  if (s_dec) remote_decoder_reset_session(s_dec);
 }
 
 static void remember_report(uint16_t handle, uint8_t id) {

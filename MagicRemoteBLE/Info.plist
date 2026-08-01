@@ -14,4 +14,9 @@
 <key>NSBluetoothPeripheralUsageDescription</key><string>MagicRemote BLE needs Bluetooth to talk to the ESP32 bridge.</string>
 <key>NSAccessibilityUsageDescription</key><string>Maps Magic Remote buttons and airmouse to Mac keyboard and mouse.</string>
 <key>NSPrincipalClass</key><string>NSApplication</string>
+<key>NSSupportsAutomaticTermination</key><false/>
+<key>NSSupportsSuddenTermination</key><false/>
+<!-- Menu-bar / accessory mode has no visible window — without this, App Nap
+     freezes CoreBluetooth + GCD after a few minutes of idle remote use. -->
+<key>NSAppSleepDisabled</key><true/>
 </dict></plist>

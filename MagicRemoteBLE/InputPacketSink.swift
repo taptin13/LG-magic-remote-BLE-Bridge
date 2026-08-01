@@ -62,6 +62,15 @@ final class PerformanceMetrics: @unchecked Sendable {
         lock.unlock()
     }
 
+    /// Drop one queued arrival without recording a latency sample. Motion that never
+    /// reaches the mapper (mapping off) would otherwise leave stale timestamps behind
+    /// and pair them with a much later handled packet, poisoning the max forever.
+    func motionSkipped() {
+        lock.lock()
+        if !motionLatenciesNs.isEmpty { motionLatenciesNs.removeFirst() }
+        lock.unlock()
+    }
+
     func eventPosted() {
         lock.lock()
         postedMotion += 1

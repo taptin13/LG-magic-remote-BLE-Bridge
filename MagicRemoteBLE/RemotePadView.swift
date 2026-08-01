@@ -1,14 +1,13 @@
 import SwiftUI
 import AppKit
 
-/// MR25GA layout — colors inverted vs the app appearance (light app → dark pad, and vice versa).
+/// Renders the active input-device profile pad layout (data-driven).
 struct RemotePadView: View {
     @EnvironmentObject var model: AppModel
     @Environment(\.colorScheme) private var appColorScheme
     @Binding var selectedCode: UInt16?
     @Binding var selectedLabel: String
 
-    /// Pad uses the opposite of the app/window color scheme.
     private var padDark: Bool { appColorScheme == .light }
 
     private var shell: Color {
@@ -30,81 +29,12 @@ struct RemotePadView: View {
         padDark ? Color.white.opacity(0.45) : Color.black.opacity(0.45)
     }
 
+    private var profile: InputDeviceProfile { model.activeProfile }
+
     var body: some View {
         VStack(spacing: 10) {
-            HStack {
-                /* Power — decorative on pad, no Learn / no BLE. */
-                decorativeBtn("Power", w: 44, h: 36, accent: .red)
-                Spacer()
-                padBtn("Help", code: 0x8029, w: 44, h: 36)
-            }
-
-            HStack(alignment: .center, spacing: 10) {
-                VStack(spacing: 8) {
-                    padBtn("Input", code: 0x80A1, w: 56, h: 34)
-                    padBtn("Home", code: 0x807C, w: 56, h: 34)
-                }
-                padBtn("AI", code: 0x808B, w: 72, h: 72, round: true)
-                VStack(spacing: 8) {
-                    padBtn("Guide", code: 0x80AB, w: 56, h: 34)
-                    padBtn("123", code: 0x8045, w: 56, h: 34)
-                }
-            }
-
-            ZStack {
-                Circle()
-                    .fill(face)
-                    .frame(width: 168, height: 168)
-                    .overlay(Circle().strokeBorder(stroke, lineWidth: 1))
-
-                VStack(spacing: 0) {
-                    padBtn("▲", code: 0x8040, label: "Up", w: 56, h: 40, flat: true)
-                    HStack(spacing: 0) {
-                        padBtn("◀", code: 0x8007, label: "Left", w: 40, h: 56, flat: true)
-                        padBtn("OK", code: 0x8044, label: "Wheel/OK", w: 56, h: 56, round: true)
-                        padBtn("▶", code: 0x8006, label: "Right", w: 40, h: 56, flat: true)
-                    }
-                    padBtn("▼", code: 0x8041, label: "Down", w: 56, h: 40, flat: true)
-                }
-            }
-            .padding(.vertical, 4)
-
-            HStack {
-                padBtn("Back", code: 0x8028, w: 64, h: 34)
-                Spacer()
-                padBtn("Settings", code: 0x8043, w: 64, h: 34)
-            }
-
-            HStack(spacing: 16) {
-                VStack(spacing: 4) {
-                    Text("VOL")
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(labelSecondary)
-                    padBtn("+", code: 0x8002, label: "Vol+", w: 88, h: 36)
-                    padBtn("−", code: 0x8003, label: "Vol-", w: 88, h: 36)
-                }
-                VStack(spacing: 4) {
-                    Text("CH")
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(labelSecondary)
-                    padBtn("∧", code: 0x8000, label: "Ch+", w: 88, h: 36)
-                    padBtn("∨", code: 0x8001, label: "Ch-", w: 88, h: 36)
-                }
-            }
-
-            VStack(spacing: 6) {
-                HStack(spacing: 6) {
-                    padBtn("B1", code: 0x8056, w: 108, h: 32)
-                    padBtn("B2", code: 0x8042, w: 108, h: 32)
-                }
-                HStack(spacing: 6) {
-                    padBtn("B3", code: 0x8031, w: 108, h: 32)
-                    padBtn("B4", code: 0x80A3, w: 108, h: 32)
-                }
-                HStack(spacing: 6) {
-                    padBtn("B5", code: 0x8048, w: 108, h: 32)
-                    padBtn("B6", code: 0x800C, w: 108, h: 32)
-                }
+            ForEach(Array(profile.pad.sections.enumerated()), id: \.offset) { _, section in
+                sectionView(section)
             }
         }
         .padding(16)
@@ -118,6 +48,142 @@ struct RemotePadView: View {
                 .strokeBorder(stroke.opacity(0.85), lineWidth: 1)
         )
         .environment(\.colorScheme, padDark ? .dark : .light)
+    }
+
+    private func sectionView(_ section: InputDeviceProfile.PadSection) -> AnyView {
+        switch section.type {
+        case "dpad":
+            return AnyView(dpadSection(section))
+        case "grid":
+            return AnyView(gridSection(section.items ?? []))
+        case "hstack":
+            return AnyView(
+                HStack(alignment: .center, spacing: 10) {
+                    ForEach(Array((section.items ?? []).enumerated()), id: \.offset) { _, item in
+                        itemView(item)
+                    }
+                }
+            )
+        case "vstack":
+            return AnyView(
+                VStack(spacing: 8) {
+                    ForEach(Array((section.items ?? []).enumerated()), id: \.offset) { _, item in
+                        itemView(item)
+                    }
+                }
+            )
+        default:
+            return AnyView(EmptyView())
+        }
+    }
+
+    private func itemView(_ item: InputDeviceProfile.PadItem) -> AnyView {
+        switch item.kind {
+        case "spacer":
+            return AnyView(Spacer(minLength: 0))
+        case "decorative":
+            return AnyView(
+                decorativeBtn(
+                    item.title ?? "",
+                    w: item.width ?? 44,
+                    h: item.height ?? 36,
+                    accent: accentColor(item.accent)
+                )
+            )
+        case "button":
+            guard let code = item.code.flatMap(HexCode.parseUInt16) else {
+                return AnyView(EmptyView())
+            }
+            return AnyView(
+                padBtn(
+                    item.title ?? profile.name(for: code),
+                    code: code,
+                    label: item.label,
+                    w: item.width ?? 56,
+                    h: item.height ?? 34,
+                    round: item.round ?? false,
+                    flat: item.flat ?? false
+                )
+            )
+        case "vstack":
+            return AnyView(
+                VStack(spacing: 8) {
+                    ForEach(Array((item.items ?? []).enumerated()), id: \.offset) { _, child in
+                        itemView(child)
+                    }
+                }
+            )
+        case "hstack":
+            return AnyView(
+                HStack(spacing: 10) {
+                    ForEach(Array((item.items ?? []).enumerated()), id: \.offset) { _, child in
+                        itemView(child)
+                    }
+                }
+            )
+        case "labeledColumn":
+            return AnyView(
+                VStack(spacing: 4) {
+                    if let title = item.title {
+                        Text(title)
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(labelSecondary)
+                    }
+                    ForEach(Array((item.items ?? []).enumerated()), id: \.offset) { _, child in
+                        itemView(child)
+                    }
+                }
+            )
+        default:
+            return AnyView(EmptyView())
+        }
+    }
+
+    private func dpadSection(_ section: InputDeviceProfile.PadSection) -> some View {
+        let up = section.up.flatMap(HexCode.parseUInt16) ?? 0
+        let left = section.left.flatMap(HexCode.parseUInt16) ?? 0
+        let ok = section.ok.flatMap(HexCode.parseUInt16) ?? 0
+        let right = section.right.flatMap(HexCode.parseUInt16) ?? 0
+        let down = section.down.flatMap(HexCode.parseUInt16) ?? 0
+        return ZStack {
+            Circle()
+                .fill(face)
+                .frame(width: 168, height: 168)
+                .overlay(Circle().strokeBorder(stroke, lineWidth: 1))
+            VStack(spacing: 0) {
+                padBtn("▲", code: up, label: profile.name(for: up), w: 56, h: 40, flat: true)
+                HStack(spacing: 0) {
+                    padBtn("◀", code: left, label: profile.name(for: left), w: 40, h: 56, flat: true)
+                    padBtn("OK", code: ok, label: profile.name(for: ok), w: 56, h: 56, round: true)
+                    padBtn("▶", code: right, label: profile.name(for: right), w: 40, h: 56, flat: true)
+                }
+                padBtn("▼", code: down, label: profile.name(for: down), w: 56, h: 40, flat: true)
+            }
+        }
+        .padding(.vertical, 4)
+    }
+
+    private func gridSection(_ items: [InputDeviceProfile.PadItem]) -> some View {
+        let buttons = items.filter { $0.kind == "button" }
+        return VStack(spacing: 6) {
+            ForEach(0..<((buttons.count + 1) / 2), id: \.self) { row in
+                HStack(spacing: 6) {
+                    let start = row * 2
+                    ForEach(start..<min(start + 2, buttons.count), id: \.self) { i in
+                        itemView(buttons[i])
+                    }
+                }
+            }
+        }
+    }
+
+    private func accentColor(_ name: String?) -> Color {
+        switch name?.lowercased() {
+        case "red": return .red
+        case "orange": return .orange
+        case "blue": return .blue
+        default: return .red
+        }
     }
 
     private func padBtn(

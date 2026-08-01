@@ -23,6 +23,7 @@ bool mac_gatt_notify_event(const bridge_packet_t *pkt);
 bool mac_gatt_notify_raw(const bridge_packet_t *pkt);
 bool mac_gatt_mac_connected(void);
 bool mac_gatt_mac_ready(void);
+uint8_t mac_gatt_current_status(void);
 uint32_t mac_gatt_link_gen(void);
 #ifdef __cplusplus
 }

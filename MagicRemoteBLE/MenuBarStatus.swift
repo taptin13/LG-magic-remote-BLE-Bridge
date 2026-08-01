@@ -37,6 +37,16 @@ enum DockVisibility {
             window.makeKeyAndOrderFront(nil)
         }
     }
+
+    /// True when a main window already exists and could be brought forward.
+    @discardableResult
+    static func revealExistingMainWindow() -> Bool {
+        let windows = NSApp.windows.filter { isMainUIWindow($0) }
+        guard !windows.isEmpty else { return false }
+        revealForMainWindow()
+        for window in windows { window.makeKeyAndOrderFront(nil) }
+        return true
+    }
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -55,8 +65,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        if !flag {
-            NotificationCenter.default.post(name: .showMagicRemoteMainWindow, object: nil)
+        guard !flag else { return true }
+        MainActor.assumeIsolated {
+            /* The menu-bar observer only exists while the menu is open, so reuse the
+               retained window directly and fall back to the notification. */
+            if !DockVisibility.revealExistingMainWindow() {
+                NotificationCenter.default.post(name: .showMagicRemoteMainWindow, object: nil)
+            }
         }
         return true
     }
@@ -113,7 +128,7 @@ struct MenuBarStatusView: View {
         }
 
         Toggle("Map to Mac input", isOn: Binding(
-            get: { model.mapper.enabled },
+            get: { model.mapper.wantsEnabled },
             set: {
                 model.mapper.setEnabled($0)
                 model.syncPointerOverlay()
@@ -124,7 +139,7 @@ struct MenuBarStatusView: View {
             get: { model.mapper.mouseMode },
             set: { model.mapper.setMouseMode($0) }
         ))
-        .disabled(!model.mapper.enabled)
+        .disabled(!model.mapper.wantsEnabled)
 
         Divider()
 
@@ -148,14 +163,20 @@ struct MenuBarStatusView: View {
 
     private var statusSubtitle: String {
         let remote = model.host.remoteStatus
-        let map = model.mapper.enabled ? (model.mapper.mouseMode ? "Mouse ON" : "Map ON") : "Map OFF"
+        let map = model.mapper.wantsEnabled
+            ? (model.mapper.enabled
+               ? (model.mapper.mouseMode ? "Mouse ON" : "Map ON")
+               : "Map (needs Accessibility)")
+            : "Map OFF"
         return "Remote: \(remote) · \(map)"
     }
 
     private func showMainWindow() {
         DockVisibility.revealForMainWindow()
-        openWindow(id: AppWindowID.main)
-        DockVisibility.orderFrontMainWindows()
+        if !DockVisibility.revealExistingMainWindow() {
+            openWindow(id: AppWindowID.main)
+            DockVisibility.orderFrontMainWindows()
+        }
     }
 }
 
@@ -169,7 +190,7 @@ enum MenuBarStatusSymbol {
         case .poweredOff, .failed:
             return "antenna.radiowaves.left.and.right.slash"
         case .idle:
-            return "remote"
+            return "av.remote"
         }
     }
 }

@@ -29,7 +29,7 @@ struct DiscoveredBridge: Identifiable, Hashable {
     let rssi: Int
 }
 
-// MARK: - Key mapping (MR25GA)
+// MARK: - Key mapping
 
 struct KeyMapRow: Identifiable, Codable, Equatable {
     var id: String { String(format: "%04X", buttonCode) }
@@ -39,52 +39,9 @@ struct KeyMapRow: Identifiable, Codable, Equatable {
     var key: UInt8
     var enabled: Bool
 
-    /// MR25GA table — Code / Maps to.
-    static let defaults: [KeyMapRow] = [
-        .init(buttonCode: 0x8000, buttonName: "Ch+", mod: 0, key: 0, enabled: false),
-        .init(buttonCode: 0x8001, buttonName: "Ch-", mod: 0, key: 0, enabled: false),
-        .init(buttonCode: 0x8002, buttonName: "Vol+", mod: 0, key: 0xF1, enabled: true),
-        .init(buttonCode: 0x8003, buttonName: "Vol-", mod: 0, key: 0xF2, enabled: true),
-        .init(buttonCode: 0x8007, buttonName: "Left", mod: 0, key: 0x50, enabled: true),
-        .init(buttonCode: 0x8006, buttonName: "Right", mod: 0, key: 0x4F, enabled: true),
-        .init(buttonCode: 0x8040, buttonName: "Up", mod: 0, key: 0x52, enabled: true),
-        .init(buttonCode: 0x8041, buttonName: "Down", mod: 0, key: 0x51, enabled: true),
-        .init(buttonCode: 0x80A1, buttonName: "Input", mod: 0, key: 0, enabled: false),
-        .init(buttonCode: 0x8045, buttonName: "123", mod: 0, key: 0, enabled: false),
-        .init(buttonCode: 0x8028, buttonName: "Back", mod: 0, key: 0x29, enabled: true),
-        .init(buttonCode: 0x8043, buttonName: "Settings", mod: 0, key: 0, enabled: false),
-        .init(buttonCode: 0x8044, buttonName: "Wheel/OK", mod: 0, key: 0x28, enabled: true),
-        .init(buttonCode: 0x80AB, buttonName: "Guide/List", mod: 0, key: 0, enabled: false),
-        .init(buttonCode: 0x807C, buttonName: "Home", mod: 0x08, key: 0x0B, enabled: true),
-        .init(buttonCode: 0x8029, buttonName: "Help", mod: 0, key: 0, enabled: false),
-        .init(buttonCode: 0x8056, buttonName: "B1", mod: 0, key: 0, enabled: false),
-        .init(buttonCode: 0x8042, buttonName: "B2", mod: 0, key: 0, enabled: false),
-        .init(buttonCode: 0x8031, buttonName: "B3", mod: 0, key: 0, enabled: false),
-        .init(buttonCode: 0x80A3, buttonName: "B4", mod: 0, key: 0, enabled: false),
-        .init(buttonCode: 0x8048, buttonName: "B5", mod: 0, key: 0, enabled: false),
-        .init(buttonCode: 0x800C, buttonName: "B6", mod: 0, key: 0, enabled: false),
-        .init(buttonCode: 0x808B, buttonName: "AI", mod: 0, key: HIDKeyPresets.siriKey, enabled: true),
-    ]
-
-    static let buttonNames: [UInt16: String] = [
-        0x8000: "Ch+", 0x8001: "Ch-",
-        0x8002: "Vol+", 0x8003: "Vol-",
-        0x8007: "Left", 0x8006: "Right",
-        0x8040: "Up", 0x8041: "Down",
-        0x80A1: "Input", 0x8045: "123", 0x8028: "Back",
-        0x8043: "Settings", 0x8044: "Wheel/OK",
-        0x80AB: "Guide/List", 0x807C: "Home",
-        0x8029: "Help",
-        0x8056: "B1", 0x8042: "B2", 0x8031: "B3",
-        0x80A3: "B4", 0x8048: "B5", 0x800C: "B6",
-        0x808B: "AI",
-        0x8009: "Mute", 0x8099: "Sleep",
-        0x8010: "0", 0x8011: "1", 0x8012: "2", 0x8013: "3", 0x8014: "4",
-        0x8015: "5", 0x8016: "6", 0x8017: "7", 0x8018: "8", 0x8019: "9",
-    ]
-
-    static func name(for code: UInt16) -> String {
-        buttonNames[code] ?? String(format: "0x%04X", code)
+    /// Fallback display when no active profile catalog entry exists.
+    static func name(for code: UInt16, catalog: [UInt16: String] = [:]) -> String {
+        catalog[code] ?? String(format: "0x%04X", code)
     }
 }
 

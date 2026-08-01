@@ -143,15 +143,11 @@ struct ConnectionView: View {
 
                     Toggle("Auto-connect", isOn: Binding(
                         get: { model.host.autoConnect },
-                        set: {
-                            model.host.autoConnect = $0
-                            model.saveConnectionPrefs()
-                            if $0 { model.host.reconnect() }
-                        }
+                        set: { model.host.setAutoConnect($0) }
                     ))
 
                     Toggle(isOn: Binding(
-                        get: { model.mapper.enabled },
+                        get: { model.mapper.wantsEnabled },
                         set: {
                             model.mapper.setEnabled($0)
                             model.syncPointerOverlay()
@@ -183,7 +179,7 @@ struct ConnectionView: View {
                 } header: {
                     Text("Pointer Options")
                 } footer: {
-                    Text("Large pointer: arrow overlay (stable over Dock/YouTube). Native scroll: macOS Natural; off = Windows direction.")
+                    Text("Large pointer scales the real system cursor while the remote drives, so it stays correct over the Dock and fullscreen video. Native scroll: macOS Natural; off = Windows direction.")
                 }
 
                 Section {
@@ -208,17 +204,24 @@ struct ConnectionView: View {
                         step: 1,
                         format: { "\(Int($0))" }
                     )
+                    airmouseSlider(
+                        label: "Tremor reduction",
+                        value: $model.tremorReduction,
+                        range: AppModel.Airmouse.tremorRange,
+                        step: 0.05,
+                        format: { "\(Int(($0 * 100).rounded()))%" }
+                    )
 
                     Button {
                         model.resetAirmouse()
                     } label: {
                         Label("Reset defaults", systemImage: "arrow.counterclockwise")
                     }
-                    .help("Sensitivity \(String(format: "%.3f", AppModel.Airmouse.sensDefault)), threshold \(Int(AppModel.Airmouse.threshDefault)), deadzone \(Int(AppModel.Airmouse.deadDefault))")
+                    .help("Sensitivity \(String(format: "%.3f", AppModel.Airmouse.sensDefault)), threshold \(Int(AppModel.Airmouse.threshDefault)), deadzone \(Int(AppModel.Airmouse.deadDefault)), tremor \(Int(AppModel.Airmouse.tremorDefault * 100))%")
                 } header: {
                     Text("Airmouse")
                 } footer: {
-                    Text("Sent to ESP when Ready. Higher sensitivity = faster move; larger deadzone = less jitter at rest.")
+                    Text("Sent to ESP when Ready. Tremor reduction smooths light hand shake; larger deadzone ignores tiny motions at rest.")
                 }
             }
             .formStyle(.grouped)
@@ -419,13 +422,16 @@ struct ConnectionView: View {
     }
 
     private var mapperDetail: String {
-        if !model.mapper.enabled { return "Off" }
-        if !model.mapper.trusted { return "Needs Accessibility permission" }
+        if model.mapper.wantsEnabled && !model.mapper.trusted {
+            return "Needs Accessibility permission"
+        }
+        if !model.mapper.wantsEnabled { return "Off" }
+        if !model.mapper.enabled { return "Waiting for Accessibility…" }
         return "Active"
     }
 
     private var mapperDetailColor: Color {
-        if model.mapper.enabled && !model.mapper.trusted { return .red }
+        if model.mapper.wantsEnabled && !model.mapper.trusted { return .red }
         return .secondary
     }
 
@@ -459,6 +465,16 @@ struct MappingView: View {
             VStack(alignment: .leading, spacing: 12) {
                 Text("Remote")
                     .font(.headline)
+
+                Picker("Input device", selection: Binding(
+                    get: { model.activeProfileId },
+                    set: { model.selectProfile(id: $0) }
+                )) {
+                    ForEach(model.availableProfiles) { p in
+                        Text(p.displayName).tag(p.id)
+                    }
+                }
+
                 Text("Click a button or press the remote to select it.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
@@ -508,7 +524,7 @@ struct MappingView: View {
                     } header: {
                         Text("Selection")
                     } footer: {
-                        Text("Assign Siri / Mouse toggle to any key. Mouse ON: Wheel/OK=left click, Settings=right, Back=mouse Back; tilt moves the pointer.")
+                        Text(mouseModeFooter)
                     }
                 }
                 .formStyle(.grouped)
@@ -559,6 +575,9 @@ struct MappingView: View {
 
                         TableColumn("On") { row in
                             let code = row.buttonCode
+                            /* Only flips `enabled` — clearing the assignment is what the
+                               "Off" preset is for, and wiping it here made the checkbox
+                               and the "Maps to" column disagree. */
                             Toggle("On", isOn: Binding(
                                 get: {
                                     model.keyMaps.first { $0.buttonCode == code }?.enabled ?? false
@@ -566,12 +585,15 @@ struct MappingView: View {
                                 set: { on in
                                     guard var r = model.keyMaps.first(where: { $0.buttonCode == code }) else { return }
                                     r.enabled = on
-                                    if !on { r.key = 0; r.mod = 0 }
                                     model.applyMap(r)
                                 }
                             ))
                             .labelsHidden()
                             .toggleStyle(.checkbox)
+                            .disabled((model.keyMaps.first { $0.buttonCode == code }?.key ?? 0) == 0)
+                            .help((model.keyMaps.first { $0.buttonCode == code }?.key ?? 0) == 0
+                                  ? "Pick a key in “Maps to” first"
+                                  : "Enable or disable this mapping")
                         }
                         .width(40)
                     }
@@ -620,8 +642,16 @@ struct MappingView: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("This replaces all custom mappings with the MR25GA defaults (AI→Siri, arrows, Home→⌘H, …).")
+            Text("This replaces all custom mappings with the \(model.activeProfile.displayName) defaults.")
         }
+    }
+
+    private var mouseModeFooter: String {
+        let b = model.activeProfile.resolvedMouseCodes
+        let left = b.left.map { model.activeProfile.name(for: $0) } ?? "—"
+        let right = b.right.map { model.activeProfile.name(for: $0) } ?? "—"
+        let back = b.back.map { model.activeProfile.name(for: $0) } ?? "—"
+        return "Assign Siri / Mouse toggle to any key. Mouse ON: \(left)=left click, \(right)=right, \(back)=mouse Back; tilt moves the pointer."
     }
 
     private var learnBanner: String {
@@ -652,9 +682,11 @@ struct MappingView: View {
             let name = selectedLabel.isEmpty ? model.displayName(for: code) : selectedLabel
             let preset = model.keyMaps.first { $0.buttonCode == code }
                 .map { HIDKeyPresets.matching(mod: $0.mod, key: $0.key).label } ?? "—"
-            let mouseNote = model.mapper.mouseMode
-                && (code == 0x8028 || code == 0x8043 || code == 0x8044)
-                ? " (mouse mode override)" : ""
+            let mouseCodes = model.activeProfile.resolvedMouseCodes
+            let isMouseBound = model.mapper.mouseMode && (
+                code == mouseCodes.left || code == mouseCodes.right || code == mouseCodes.back
+            )
+            let mouseNote = isMouseBound ? " (mouse mode override)" : ""
             return "\(name)  ·  0x\(String(format: "%04X", code))  →  \(preset)\(mouseNote)"
         }
         if model.learnMode {

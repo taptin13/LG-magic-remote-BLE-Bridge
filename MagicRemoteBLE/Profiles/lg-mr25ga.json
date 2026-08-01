@@ -1,0 +1,149 @@
+{
+  "schemaVersion": 1,
+  "id": "lg-mr25ga",
+  "displayName": "LG Magic Remote MR25GA",
+  "match": {
+    "bleNameContains": ["MR25GA", "LGE MR"]
+  },
+  "buttons": [
+    { "code": "0x8000", "name": "Ch+" },
+    { "code": "0x8001", "name": "Ch-" },
+    { "code": "0x8002", "name": "Vol+" },
+    { "code": "0x8003", "name": "Vol-" },
+    { "code": "0x8007", "name": "Left" },
+    { "code": "0x8006", "name": "Right" },
+    { "code": "0x8040", "name": "Up" },
+    { "code": "0x8041", "name": "Down" },
+    { "code": "0x80A1", "name": "Input" },
+    { "code": "0x8045", "name": "123" },
+    { "code": "0x8028", "name": "Back", "role": "back" },
+    { "code": "0x8043", "name": "Settings", "role": "settings" },
+    { "code": "0x8044", "name": "Wheel/OK", "role": "ok" },
+    { "code": "0x80AB", "name": "Guide/List" },
+    { "code": "0x807C", "name": "Home" },
+    { "code": "0x8029", "name": "Help" },
+    { "code": "0x8056", "name": "B1" },
+    { "code": "0x8042", "name": "B2" },
+    { "code": "0x8031", "name": "B3" },
+    { "code": "0x80A3", "name": "B4" },
+    { "code": "0x8048", "name": "B5" },
+    { "code": "0x800C", "name": "B6" },
+    { "code": "0x808B", "name": "AI" },
+    { "code": "0x8009", "name": "Mute" },
+    { "code": "0x8099", "name": "Sleep" },
+    { "code": "0x8010", "name": "0" },
+    { "code": "0x8011", "name": "1" },
+    { "code": "0x8012", "name": "2" },
+    { "code": "0x8013", "name": "3" },
+    { "code": "0x8014", "name": "4" },
+    { "code": "0x8015", "name": "5" },
+    { "code": "0x8016", "name": "6" },
+    { "code": "0x8017", "name": "7" },
+    { "code": "0x8018", "name": "8" },
+    { "code": "0x8019", "name": "9" }
+  ],
+  "mouseBindings": {
+    "left": "ok",
+    "right": "settings",
+    "back": "back"
+  },
+  "defaultMaps": [
+    { "code": "0x8000", "mod": 0, "key": "0x00", "enabled": false },
+    { "code": "0x8001", "mod": 0, "key": "0x00", "enabled": false },
+    { "code": "0x8002", "mod": 0, "key": "0xF1", "enabled": true },
+    { "code": "0x8003", "mod": 0, "key": "0xF2", "enabled": true },
+    { "code": "0x8007", "mod": 0, "key": "0x50", "enabled": true },
+    { "code": "0x8006", "mod": 0, "key": "0x4F", "enabled": true },
+    { "code": "0x8040", "mod": 0, "key": "0x52", "enabled": true },
+    { "code": "0x8041", "mod": 0, "key": "0x51", "enabled": true },
+    { "code": "0x80A1", "mod": 0, "key": "0x00", "enabled": false },
+    { "code": "0x8045", "mod": 0, "key": "0x00", "enabled": false },
+    { "code": "0x8028", "mod": 0, "key": "0x29", "enabled": true },
+    { "code": "0x8043", "mod": 0, "key": "0x00", "enabled": false },
+    { "code": "0x8044", "mod": 0, "key": "0x28", "enabled": true },
+    { "code": "0x80AB", "mod": 0, "key": "0x00", "enabled": false },
+    { "code": "0x807C", "mod": 8, "key": "0x0B", "enabled": true },
+    { "code": "0x8029", "mod": 0, "key": "0x00", "enabled": false },
+    { "code": "0x8056", "mod": 0, "key": "0x00", "enabled": false },
+    { "code": "0x8042", "mod": 0, "key": "0x00", "enabled": false },
+    { "code": "0x8031", "mod": 0, "key": "0x00", "enabled": false },
+    { "code": "0x80A3", "mod": 0, "key": "0x00", "enabled": false },
+    { "code": "0x8048", "mod": 0, "key": "0x00", "enabled": false },
+    { "code": "0x800C", "mod": 0, "key": "0x00", "enabled": false },
+    { "code": "0x808B", "mod": 0, "key": "0xFE", "enabled": true }
+  ],
+  "pad": {
+    "sections": [
+      {
+        "type": "hstack",
+        "items": [
+          { "kind": "decorative", "title": "Power", "width": 44, "height": 36, "accent": "red" },
+          { "kind": "spacer" },
+          { "kind": "button", "code": "0x8029", "title": "Help", "width": 44, "height": 36 }
+        ]
+      },
+      {
+        "type": "hstack",
+        "items": [
+          { "kind": "vstack", "items": [
+            { "kind": "button", "code": "0x80A1", "title": "Input", "width": 56, "height": 34 },
+            { "kind": "button", "code": "0x807C", "title": "Home", "width": 56, "height": 34 }
+          ]},
+          { "kind": "button", "code": "0x808B", "title": "AI", "width": 72, "height": 72, "round": true },
+          { "kind": "vstack", "items": [
+            { "kind": "button", "code": "0x80AB", "title": "Guide", "label": "Guide/List", "width": 56, "height": 34 },
+            { "kind": "button", "code": "0x8045", "title": "123", "width": 56, "height": 34 }
+          ]}
+        ]
+      },
+      {
+        "type": "dpad",
+        "up": "0x8040",
+        "left": "0x8007",
+        "ok": "0x8044",
+        "right": "0x8006",
+        "down": "0x8041"
+      },
+      {
+        "type": "hstack",
+        "items": [
+          { "kind": "button", "code": "0x8028", "title": "Back", "width": 64, "height": 34 },
+          { "kind": "spacer" },
+          { "kind": "button", "code": "0x8043", "title": "Settings", "width": 64, "height": 34 }
+        ]
+      },
+      {
+        "type": "hstack",
+        "items": [
+          {
+            "kind": "labeledColumn",
+            "title": "VOL",
+            "items": [
+              { "kind": "button", "code": "0x8002", "title": "+", "label": "Vol+", "width": 88, "height": 36 },
+              { "kind": "button", "code": "0x8003", "title": "−", "label": "Vol-", "width": 88, "height": 36 }
+            ]
+          },
+          {
+            "kind": "labeledColumn",
+            "title": "CH",
+            "items": [
+              { "kind": "button", "code": "0x8000", "title": "∧", "label": "Ch+", "width": 88, "height": 36 },
+              { "kind": "button", "code": "0x8001", "title": "∨", "label": "Ch-", "width": 88, "height": 36 }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "grid",
+        "items": [
+          { "kind": "button", "code": "0x8056", "title": "B1", "width": 108, "height": 32 },
+          { "kind": "button", "code": "0x8042", "title": "B2", "width": 108, "height": 32 },
+          { "kind": "button", "code": "0x8031", "title": "B3", "width": 108, "height": 32 },
+          { "kind": "button", "code": "0x80A3", "title": "B4", "width": 108, "height": 32 },
+          { "kind": "button", "code": "0x8048", "title": "B5", "width": 108, "height": 32 },
+          { "kind": "button", "code": "0x800C", "title": "B6", "width": 108, "height": 32 }
+        ]
+      }
+    ]
+  }
+}

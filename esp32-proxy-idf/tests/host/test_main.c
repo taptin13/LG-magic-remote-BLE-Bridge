@@ -105,6 +105,9 @@ static void test_decoder_buttons(void) {
   free(d);
 }
 
+/* kBiasWarmup in remote_decoder.c, plus margin. */
+static const int kCalibrationFrames = 80;
+
 static void fd_set_gyro(uint8_t fd[19], int16_t gx, int16_t gy, int16_t gz) {
   int16_t gyro[3] = {gx, gy, gz};
   for (int i = 0; i < 3; i++) {
@@ -122,7 +125,7 @@ static void test_decoder_reconnect_calibration(void) {
   uint8_t fd[19] = {0};
   fd[0] = 0xFD;
 
-  /* Hand movement after reconnect must not become the new gyro bias. */
+  /* Hard boot + waving: no motion (would drift with a provisional bias). */
   for (int i = 0; i < 80; i++) {
     int16_t v = (i & 1) ? 500 : -500;
     fd_set_gyro(fd, v, 0, (int16_t)-v);
@@ -130,20 +133,83 @@ static void test_decoder_reconnect_calibration(void) {
   }
   EXPECT(event_bus_stub_count() == 0);
 
-  /* Once stationary, calibration completes automatically. */
+  /* Hold still → calibrate → motion works. */
   for (int i = 0; i < 60; i++) {
     fd_set_gyro(fd, 100, -20, 80);
     remote_decoder_on_fd(d, fd, sizeof(fd));
   }
+  bus_event_t ev;
+  while (event_bus_take(&ev, 0)) {
+  }
   fd_set_gyro(fd, 900, -20, 900);
   remote_decoder_on_fd(d, fd, sizeof(fd));
-
-  bus_event_t ev;
   int saw_motion = 0;
   while (event_bus_take(&ev, 0)) {
     if (ev.type == BUS_MOTION && (ev.u.motion.dx || ev.u.motion.dy)) saw_motion = 1;
   }
   EXPECT(saw_motion == 1);
+
+  /* Soft reconnect: motion blocked briefly; after still (quick) or timeout+fallback. */
+  remote_decoder_reset_session(d);
+  saw_motion = 0;
+  fd_set_gyro(fd, 900, -20, 900);
+  remote_decoder_on_fd(d, fd, sizeof(fd));
+  while (event_bus_take(&ev, 0)) {
+    if (ev.type == BUS_MOTION && (ev.u.motion.dx || ev.u.motion.dy)) saw_motion = 1;
+  }
+  EXPECT(saw_motion == 0);
+
+  for (int i = 0; i < 30; i++) {
+    fd_set_gyro(fd, 100, -20, 80);
+    remote_decoder_on_fd(d, fd, sizeof(fd));
+  }
+  while (event_bus_take(&ev, 0)) {
+  }
+  saw_motion = 0;
+  fd_set_gyro(fd, 900, -20, 900);
+  remote_decoder_on_fd(d, fd, sizeof(fd));
+  while (event_bus_take(&ev, 0)) {
+    if (ev.type == BUS_MOTION && (ev.u.motion.dx || ev.u.motion.dy)) saw_motion = 1;
+  }
+  EXPECT(saw_motion == 1);
+  free(d);
+}
+
+/* Slow diagonal motion must keep its direction. A per-axis deadzone gave each axis
+ * a different gain, flattening the path toward the dominant axis and producing a
+ * visible zigzag; the radial deadzone must hold the dx:dy ratio instead. */
+static void test_decoder_slow_diagonal_direction(void) {
+  event_bus_init();
+  remote_decoder_t *d = remote_decoder_create();
+  EXPECT(d != NULL);
+  remote_decoder_reset(d);
+  uint8_t fd[19] = {0};
+  fd[0] = 0xFD;
+
+  /* Settle the bias at zero. */
+  for (int i = 0; i < kCalibrationFrames; i++) {
+    fd_set_gyro(fd, 0, 0, 0);
+    remote_decoder_on_fd(d, fd, sizeof(fd));
+  }
+
+  /* gz drives dx, gx drives dy. Hold a steady 2:1 slope just above the deadzone. */
+  const int16_t gz = 80, gx = 40;
+  long sum_dx = 0, sum_dy = 0;
+  for (int i = 0; i < 400; i++) {
+    fd_set_gyro(fd, gx, 0, gz);
+    remote_decoder_on_fd(d, fd, sizeof(fd));
+  }
+  bus_event_t ev;
+  while (event_bus_take(&ev, 0)) {
+    if (ev.type == BUS_MOTION) {
+      sum_dx += ev.u.motion.dx;
+      sum_dy += ev.u.motion.dy;
+    }
+  }
+  EXPECT(sum_dx != 0 && sum_dy != 0);
+  /* Both axes move, and the 2:1 input slope survives within 10%. */
+  double ratio = (double)sum_dx / (double)sum_dy;
+  EXPECT(ratio > 1.8 && ratio < 2.2);
   free(d);
 }
 
@@ -163,6 +229,7 @@ int main(void) {
   test_bridge_state();
   test_decoder_buttons();
   test_decoder_reconnect_calibration();
+  test_decoder_slow_diagonal_direction();
   test_fault_inject();
   if (g_fail) {
     fprintf(stderr, "%d assertion(s) failed\n", g_fail);
