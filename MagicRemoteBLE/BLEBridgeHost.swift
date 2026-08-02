@@ -54,6 +54,9 @@ final class BLEBridgeHost: NSObject, ObservableObject {
     /// with CBError 6 when the peripheral is quiet (no button/motion notifies).
     private var linkKeepAliveTimer: Timer?
     private var linkKeepAliveTicks = 0
+    /// Updated on the CoreBluetooth queue; used only to avoid redundant pings
+    /// while the peripheral is already delivering event notifications.
+    nonisolated(unsafe) private var lastEventReceivedAt: CFAbsoluteTime = 0
 
     override init() {
         super.init()
@@ -243,6 +246,7 @@ final class BLEBridgeHost: NSObject, ObservableObject {
     private func startLinkKeepAlive() {
         stopLinkKeepAlive()
         linkKeepAliveTicks = 0
+        lastEventReceivedAt = 0
         /* One sparse ATT ping is enough to verify liveness. Avoid stacking a
            write, RSSI read and status read every 2s: ESP32 is dual-role and
            that traffic can collide with the high-rate remote notify path. */
@@ -251,6 +255,7 @@ final class BLEBridgeHost: NSObject, ObservableObject {
                 self?.linkKeepAliveTick()
             }
         }
+        t.tolerance = 1.0
         RunLoop.main.add(t, forMode: .common)
         linkKeepAliveTimer = t
         /* Immediate first ping — do not wait 2s after Ready. */
@@ -266,6 +271,13 @@ final class BLEBridgeHost: NSObject, ObservableObject {
     private func linkKeepAliveTick() {
         guard phase == .ready, let p = active else {
             stopLinkKeepAlive()
+            return
+        }
+        let now = CFAbsoluteTimeGetCurrent()
+        if lastEventReceivedAt > 0,
+           now - lastEventReceivedAt < 6.0 {
+            /* Active notifications already prove the link is alive. The ping
+               is only needed for the quiet-peripheral timeout case. */
             return
         }
         let cmd = cmdChar
@@ -567,6 +579,7 @@ extension BLEBridgeHost: CBPeripheralDelegate {
             PerformanceMetrics.shared.parseError()
             return
         }
+        lastEventReceivedAt = CFAbsoluteTimeGetCurrent()
         pkt.receivedAtNs = PerformanceMetrics.shared.received(pkt)
 
         /* Motion: inject on BLE queue only — no MainActor hop (smoother). */
