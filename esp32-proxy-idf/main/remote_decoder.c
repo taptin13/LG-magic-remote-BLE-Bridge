@@ -19,7 +19,7 @@ struct remote_decoder {
   float gravity_ref_x, gravity_ref_z;
   float orient_cos, orient_sin;
   int bias_samples;
-  bool calibrating, have_bias, accel_ready, gravity_ref_valid, pointer_mode;
+  bool calibrating, have_bias, accel_ready, gravity_ref_valid;
   float carry_x, carry_y;
   int still_samples;
   uint16_t last_btn;
@@ -31,6 +31,7 @@ static const int kBiasWarmup = 60;
  * window and calibrates automatically once the remote is held still. */
 static const float kBiasStableSpan = 90.0f;
 static const float kLpf = 0.42f;
+static const float kFastLpf = 0.58f;
 static const float kGravityLpf = 0.08f;
 static const float kStill = 70.0f;
 /* ~80ms still (FD ~100Hz) before clearing fractional carry. */
@@ -38,7 +39,6 @@ static const int kStillClearSamples = 8;
 
 static void clear_motion_transients(remote_decoder_t *d) {
   memset(d->gyro_lpf, 0, sizeof(d->gyro_lpf));
-  d->pointer_mode = false;
   d->carry_x = d->carry_y = 0;
   d->still_samples = 0;
   d->last_btn = 0;
@@ -265,10 +265,17 @@ void remote_decoder_on_fd(remote_decoder_t *d, const uint8_t *p, size_t len) {
       cy = gy - d->gyro_bias[1];
       cz = gz - d->gyro_bias[2];
     }
-    /* Tremor↑ → heavier LPF (less high-frequency hand shake). Floor keeps
-     * intentional flicks responsive even at max tremor. */
+    /* Tremor↑ → heavier LPF at low speed. Above `thresh`, progressively open
+     * the filter so intentional flicks respond quickly. Previously threshold
+     * only set an unread `pointer_mode` flag and the UI control had no effect. */
     float lpf = kLpf * (1.0f - 0.70f * d->tremor);
     if (lpf < 0.12f) lpf = 0.12f;
+    float motion_mag = hypotf(cx, cz);
+    float response_thresh = fmaxf(1.0f, d->thresh);
+    float fast_blend = (motion_mag - response_thresh) / response_thresh;
+    if (fast_blend < 0.0f) fast_blend = 0.0f;
+    if (fast_blend > 1.0f) fast_blend = 1.0f;
+    lpf += (kFastLpf - lpf) * fast_blend;
     d->gyro_lpf[0] = lpf * cx + (1.0f - lpf) * d->gyro_lpf[0];
     d->gyro_lpf[1] = lpf * cy + (1.0f - lpf) * d->gyro_lpf[1];
     d->gyro_lpf[2] = lpf * cz + (1.0f - lpf) * d->gyro_lpf[2];
@@ -284,9 +291,6 @@ void remote_decoder_on_fd(remote_decoder_t *d, const uint8_t *p, size_t len) {
     soft_vector(dead, oriented_gz, oriented_gx, &sx, &sy);
     sx *= d->sens;
     sy *= d->sens;
-    if (fabsf(oriented_gx) > d->thresh || fabsf(oriented_gz) > d->thresh)
-      d->pointer_mode = true;
-
     if (sx == 0.0 && sy == 0.0) {
       /* Keep fractional carry through short deadzone; clear only after ~80ms still. */
       d->still_samples++;

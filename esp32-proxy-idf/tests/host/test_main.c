@@ -261,6 +261,37 @@ static void test_decoder_slow_diagonal_direction(void) {
   free(d);
 }
 
+static long decoder_initial_flick_response(float threshold) {
+  event_bus_init();
+  event_bus_stub_reset();
+  remote_decoder_t *d = remote_decoder_create();
+  remote_decoder_reset(d);
+  remote_decoder_set_sens(d, 0.045f, threshold, 28.0f);
+  remote_decoder_set_tremor(d, 1.0f);
+  uint8_t fd[19] = {0};
+  fd[0] = 0xFD;
+  for (int i = 0; i < kCalibrationFrames; i++) {
+    fd_set_gyro(fd, 0, 0, 0);
+    remote_decoder_on_fd(d, fd, sizeof(fd));
+  }
+
+  long sum_dx = 0, sum_dy = 0;
+  for (int i = 0; i < 3; i++) {
+    fd_set_gyro(fd, 0, 0, 900);
+    remote_decoder_on_fd(d, fd, sizeof(fd));
+    drain_motion(&sum_dx, &sum_dy);
+  }
+  free(d);
+  return labs(sum_dx);
+}
+
+static void test_decoder_threshold_opens_fast_response(void) {
+  long adaptive = decoder_initial_flick_response(100.0f);
+  long filtered = decoder_initial_flick_response(2000.0f);
+  EXPECT(adaptive > filtered);
+  EXPECT(filtered > 0);
+}
+
 static void test_fault_inject(void) {
   bridge_fault_reset();
   bridge_fault()->drop_next_tx = 2;
@@ -279,6 +310,7 @@ int main(void) {
   test_decoder_reconnect_calibration();
   test_decoder_roll_compensation();
   test_decoder_slow_diagonal_direction();
+  test_decoder_threshold_opens_fast_response();
   test_fault_inject();
   if (g_fail) {
     fprintf(stderr, "%d assertion(s) failed\n", g_fail);

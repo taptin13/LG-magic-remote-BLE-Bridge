@@ -755,9 +755,8 @@ final class InputMapper: ObservableObject {
             return
         }
         let t = DispatchSource.makeTimerSource(queue: smoothQueue)
-        // 4 ms display-side cadence reduces motion quantization without a
-        // MainActor hop; BLE motion already arrives through InputPacketSink.
-        t.schedule(deadline: .now(), repeating: .milliseconds(4), leeway: .milliseconds(1))
+        // 4 ms cadence keeps first-visible latency below one 120 Hz frame.
+        t.schedule(deadline: .now(), repeating: .milliseconds(4), leeway: .microseconds(250))
         t.setEventHandler { [weak self] in self?.smoothTick() }
         smoothTimer = t
         lock.unlock()
