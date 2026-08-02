@@ -557,9 +557,10 @@ int ble_core_do_scan_start(uint8_t own_addr_type, uint32_t duration_ms, ble_gap_
   return rc;
 }
 
-int ble_core_do_connect(uint8_t own_addr_type, const ble_addr_t *addr, ble_gap_event_fn *cb) {
+int ble_core_do_connect(uint8_t own_addr_type, const ble_addr_t *addr, uint32_t timeout_ms,
+                        ble_gap_event_fn *cb) {
   if (!addr) return BLE_HS_EINVAL;
-  int rc = ble_gap_connect(own_addr_type, addr, 30000, NULL, cb, NULL);
+  int rc = ble_gap_connect(own_addr_type, addr, timeout_ms, NULL, cb, NULL);
   if (rc != 0) ESP_LOGW(TAG, "connect rc=%d", rc);
   return rc;
 }
@@ -656,7 +657,7 @@ static void exec_cmd(const ble_core_msg_t *m) {
       (void)ble_core_do_scan_start(m->own_addr_type, m->scan_ms, m->gap_cb);
       break;
     case BLE_CMD_CONNECT:
-      (void)ble_core_do_connect(m->own_addr_type, &m->addr, m->gap_cb);
+      (void)ble_core_do_connect(m->own_addr_type, &m->addr, m->connect_ms, m->gap_cb);
       break;
     case BLE_CMD_DISCONNECT:
       (void)ble_core_do_disconnect(m->conn);
@@ -772,12 +773,14 @@ void ble_core_cmd_scan_cancel(void) {
   ble_core_msg_t m = {.cmd = BLE_CMD_SCAN_CANCEL};
   ble_core_post(&m);
 }
-void ble_core_cmd_connect(uint8_t own_addr_type, const ble_addr_t *addr, ble_gap_event_fn *cb) {
+void ble_core_cmd_connect(uint8_t own_addr_type, const ble_addr_t *addr, uint32_t timeout_ms,
+                          ble_gap_event_fn *cb) {
   if (!addr) return;
   ble_core_msg_t m = {0};
   m.cmd = BLE_CMD_CONNECT;
   m.own_addr_type = own_addr_type;
   m.addr = *addr;
+  m.connect_ms = timeout_ms;
   m.gap_cb = cb;
   ble_core_post(&m);
 }

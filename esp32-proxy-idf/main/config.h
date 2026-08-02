@@ -8,6 +8,11 @@
 #define SCAN_INTERVAL    80
 #define SCAN_WINDOW      48
 
+/* Direct cached connects must fail fast when the remote is asleep. A scan
+ * immediately after wake is substantially faster than two 30s direct tries. */
+#define CACHED_CONNECT_TIMEOUT_MS 5000
+#define SCANNED_CONNECT_TIMEOUT_MS 15000
+
 /* Maximum idle wait for the BLE owner loop before checking work again. */
 #ifndef BLE_CORE_IDLE_WAIT_MS
 #define BLE_CORE_IDLE_WAIT_MS 2

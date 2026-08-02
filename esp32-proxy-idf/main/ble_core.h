@@ -74,6 +74,7 @@ typedef struct {
   ble_addr_t addr;
   uint8_t own_addr_type;
   uint32_t scan_ms;
+  uint32_t connect_ms;
   ble_gap_event_fn *gap_cb;
   struct ble_gap_upd_params upd;
   ble_disc_ctx_t disc_ctx;
@@ -108,7 +109,8 @@ void ble_core_release_pressed_buttons(void);
 /** Sync ops — BleCoreTask only. */
 int ble_core_do_scan_cancel(void);
 int ble_core_do_scan_start(uint8_t own_addr_type, uint32_t duration_ms, ble_gap_event_fn *cb);
-int ble_core_do_connect(uint8_t own_addr_type, const ble_addr_t *addr, ble_gap_event_fn *cb);
+int ble_core_do_connect(uint8_t own_addr_type, const ble_addr_t *addr, uint32_t timeout_ms,
+                        ble_gap_event_fn *cb);
 int ble_core_do_disconnect(uint16_t conn);
 int ble_core_do_security(uint16_t conn);
 int ble_core_do_gap_update(uint16_t conn, const struct ble_gap_upd_params *up);
@@ -129,7 +131,8 @@ void ble_core_cmd_adv_start(void);
 void ble_core_cmd_adv_stop(void);
 void ble_core_cmd_scan_start(uint8_t own_addr_type, uint32_t duration_ms, ble_gap_event_fn *cb);
 void ble_core_cmd_scan_cancel(void);
-void ble_core_cmd_connect(uint8_t own_addr_type, const ble_addr_t *addr, ble_gap_event_fn *cb);
+void ble_core_cmd_connect(uint8_t own_addr_type, const ble_addr_t *addr, uint32_t timeout_ms,
+                          ble_gap_event_fn *cb);
 void ble_core_cmd_disconnect(uint16_t conn);
 void ble_core_cmd_security(uint16_t conn);
 void ble_core_cmd_set_status(uint8_t st);

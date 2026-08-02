@@ -10,6 +10,8 @@ static const char *TAG = "BUS";
 
 static QueueHandle_t s_q;
 static SemaphoreHandle_t s_wake;
+/* Serializes producer-side eviction. The consumer remains lock-free. */
+static SemaphoreHandle_t s_q_mu;
 
 static portMUX_TYPE s_motion_mux = portMUX_INITIALIZER_UNLOCKED;
 static int32_t s_mx, s_my;
@@ -27,7 +29,8 @@ bool event_bus_init(void) {
   if (s_q) return true;
   s_q = xQueueCreate(EVENT_QUEUE_LEN, sizeof(bus_event_t));
   s_wake = xSemaphoreCreateBinary();
-  return s_q != NULL && s_wake != NULL;
+  s_q_mu = xSemaphoreCreateMutex();
+  return s_q != NULL && s_wake != NULL && s_q_mu != NULL;
 }
 
 static void wake(void) {
@@ -133,23 +136,44 @@ void event_bus_requeue_motion(int16_t dx, int16_t dy, uint16_t buttons, int8_t w
 }
 
 static bool queue_send_prio(const bus_event_t *ev) {
-  if (xQueueSend(s_q, ev, 0) == pdTRUE) return true;
+  if (!s_q_mu || xSemaphoreTake(s_q_mu, portMAX_DELAY) != pdTRUE) return false;
+  if (xQueueSend(s_q, ev, 0) == pdTRUE) {
+    xSemaphoreGive(s_q_mu);
+    return true;
+  }
 
-  if (ev->type != BUS_BUTTON && ev->type != BUS_STATUS) return false;
+  if (ev->type != BUS_BUTTON && ev->type != BUS_STATUS) {
+    xSemaphoreGive(s_q_mu);
+    return false;
+  }
 
+  /* Never evict a button-up. Rotate releases to the tail until an expendable
+   * event is found. EVENT_QUEUE_LEN is bounded, so this cannot spin forever. */
   bus_event_t discarded;
-  if (xQueueReceive(s_q, &discarded, 0) != pdTRUE) return false;
+  bool found = false;
+  for (int i = 0; i < EVENT_QUEUE_LEN; i++) {
+    if (xQueueReceive(s_q, &discarded, 0) != pdTRUE) break;
+    if (discarded.type == BUS_BUTTON && discarded.u.button.down == 0) {
+      if (xQueueSend(s_q, &discarded, 0) != pdTRUE) break;
+      continue;
+    }
+    found = true;
+    break;
+  }
+  if (!found) {
+    /* The consumer may have drained the queue while releases were rotated. */
+    bool ok = xQueueSend(s_q, ev, 0) == pdTRUE;
+    xSemaphoreGive(s_q_mu);
+    return ok;
+  }
   s_overflow_drops++;
   if ((s_overflow_drops % 16u) == 1u) {
     ESP_LOGW(TAG, "queue full — drop type=%u for type=%u (drops=%lu)",
              (unsigned)discarded.type, (unsigned)ev->type, (unsigned long)s_overflow_drops);
   }
-  if (xQueueSend(s_q, ev, 0) != pdTRUE) return false;
-
-  if (discarded.type == BUS_BUTTON && discarded.u.button.down == 0) {
-    (void)xQueueSend(s_q, &discarded, 0);
-  }
-  return true;
+  bool ok = xQueueSend(s_q, ev, 0) == pdTRUE;
+  xSemaphoreGive(s_q_mu);
+  return ok;
 }
 
 bool event_bus_publish(const bus_event_t *ev) {
@@ -165,12 +189,13 @@ bool event_bus_publish(const bus_event_t *ev) {
 
 bool event_bus_take(bus_event_t *out, uint32_t timeout_ms) {
   if (!s_q || !out) return false;
+  TickType_t t = (timeout_ms == UINT32_MAX) ? portMAX_DELAY : pdMS_TO_TICKS(timeout_ms);
+  /* Reliable control/button traffic wins over lossy coalesced cursor motion. */
+  if (xQueueReceive(s_q, out, 0) == pdTRUE) return true;
   if (event_bus_take_motion(&out->u.motion)) {
     out->type = BUS_MOTION;
     return true;
   }
-  TickType_t t = (timeout_ms == UINT32_MAX) ? portMAX_DELAY : pdMS_TO_TICKS(timeout_ms);
-  if (xQueueReceive(s_q, out, 0) == pdTRUE) return true;
   if (timeout_ms == 0) return false;
   if (s_wake) xSemaphoreTake(s_wake, t);
   if (event_bus_take_motion(&out->u.motion)) {

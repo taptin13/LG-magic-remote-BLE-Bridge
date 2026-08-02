@@ -52,7 +52,11 @@ static bool s_disc_ok;
 static bool s_disc_fail;
 static bool s_need_secure;
 static int64_t s_connect_ms;
+static int64_t s_connect_deadline_ms;
 static int64_t s_reconnect_delay_ms = 400;
+/* Alternate a fast cached attempt with active scan instead of blocking on
+ * consecutive long direct connects while the remote is asleep. */
+static bool s_recovery_next_scan;
 static int s_enc_fail_streak;
 /** Incremented on each connect/disconnect — stale discovery callbacks are ignored. */
 static uint32_t s_conn_gen;
@@ -71,7 +75,7 @@ static const ble_uuid16_t uuid_2908 = BLE_UUID16_INIT(0x2908);
 
 static int gap_event(struct ble_gap_event *event, void *arg);
 static void start_scan_burst(void);
-static void try_connect(void);
+static void try_connect(uint32_t timeout_ms);
 static void try_cached_reconnect(void);
 static void begin_discover(void);
 static void finish_discover_ok(void);
@@ -484,6 +488,8 @@ static void discover_fail(void) {
 
 static void finish_discover_ok(void) {
   s_disc_ok = true;
+  s_remote_drop = false;
+  s_recovery_next_scan = false;
   save_cache();
   reset_motion_session();
   struct ble_gap_upd_params up = {
@@ -558,6 +564,7 @@ static int gap_event(struct ble_gap_event *event, void *arg) {
         if (ble_gap_conn_find(event->connect.conn_handle, &desc) != 0) return 0;
         if (desc.role != BLE_GAP_ROLE_MASTER) return 0; /* Mac peripheral conn */
         s_conn = event->connect.conn_handle;
+        s_remote_drop = false;
         s_conn_gen++;
         bridge_session_bump_remote();
         ESP_LOGI(TAG, "REMOTE CONNECT handle=%u gen=%lu", s_conn, (unsigned long)s_conn_gen);
@@ -590,6 +597,7 @@ static int gap_event(struct ble_gap_event *event, void *arg) {
         reset_motion_session();
         ble_core_cmd_release_buttons();
         s_remote_drop = true;
+        s_recovery_next_scan = false;
       }
       return 0;
     }
@@ -668,6 +676,7 @@ static void start_scan_burst(void) {
   smp_for_remote();
   s_got_target = false;
   s_do_connect = false;
+  s_recovery_next_scan = false;
   s_scan_ms = now_ms();
 
   ESP_LOGI(TAG, "SCAN burst %dms \"%s\"%s", SCAN_BURST_MS, REMOTE_NAME,
@@ -682,14 +691,16 @@ static void start_scan_burst(void) {
   mac_gatt_set_status(ST_SCAN_REMOTE);
 }
 
-static void try_connect(void) {
+static void try_connect(uint32_t timeout_ms) {
   set_state(REM_CONNECTING);
   mac_gatt_set_status(ST_REMOTE_CONN);
   (void)ble_core_do_scan_cancel();
   smp_for_remote();
 
-  ESP_LOGI(TAG, "connecting type=%u (keep bonds, paired=%d)", s_target.type, (int)s_paired);
-  int rc = ble_core_do_connect(s_own_addr_type, &s_target, gap_event);
+  s_connect_deadline_ms = now_ms() + timeout_ms + 1000;
+  ESP_LOGI(TAG, "connecting type=%u timeout=%lums (keep bonds, paired=%d)", s_target.type,
+           (unsigned long)timeout_ms, (int)s_paired);
+  int rc = ble_core_do_connect(s_own_addr_type, &s_target, timeout_ms, gap_event);
   if (rc != 0) {
     ESP_LOGW(TAG, "connect FAIL rc=%d", rc);
     set_state(REM_RECOVERING);
@@ -705,7 +716,8 @@ static void try_cached_reconnect(void) {
   ESP_LOGI(TAG, "cached reconnect (press remote button if not seen)");
   s_got_target = false;
   s_do_connect = false;
-  try_connect();
+  s_recovery_next_scan = true;
+  try_connect(CACHED_CONNECT_TIMEOUT_MS);
 }
 
 void remote_manager_init(remote_decoder_t *decoder) {
@@ -766,7 +778,7 @@ void remote_manager_tick(void) {
   if (bridge_state_remote() == REM_SCANNING) {
     if (s_do_connect) {
       s_do_connect = false;
-      try_connect();
+      try_connect(SCANNED_CONNECT_TIMEOUT_MS);
       return;
     }
     if (now_ms() - s_scan_ms > SCAN_BURST_MS + 2000) {
@@ -776,7 +788,8 @@ void remote_manager_tick(void) {
     return;
   }
 
-  if (bridge_state_remote() == REM_CONNECTING && now_ms() - s_state_ms > 35000) {
+  if (bridge_state_remote() == REM_CONNECTING && s_connect_deadline_ms &&
+      now_ms() > s_connect_deadline_ms) {
     bridge_metrics()->connect_timeout++;
     ESP_LOGW(TAG, "connect timeout");
     set_state(REM_RECOVERING);
@@ -800,14 +813,25 @@ void remote_manager_tick(void) {
 
   if (bridge_state_remote() == REM_RECOVERING) {
     if (!mac_gatt_mac_ready()) return;
+    /* A stale drop flag must never launch scan/connect over a healthy link.
+     * This previously produced BLE_HS_EALREADY while FD notifications were
+     * still arriving from the already-connected remote. */
+    if (s_conn != BLE_HS_CONN_HANDLE_NONE && s_disc_ok) {
+      ESP_LOGW(TAG, "recovering with live remote — restore READY");
+      s_remote_drop = false;
+      s_recovery_next_scan = false;
+      set_state(REM_READY);
+      mac_gatt_set_status(ST_READY);
+      return;
+    }
     if (now_ms() - s_state_ms > s_reconnect_delay_ms) {
-      /* Round 1: cached; later scan (RPA may change). */
-      static int s_re_n;
       bridge_metrics()->reconnect_count++;
-      if (s_paired && s_have_cached_addr && (s_re_n++ % 2) == 0)
-        try_cached_reconnect();
-      else
+      if (s_recovery_next_scan) {
+        s_recovery_next_scan = false;
         start_scan_burst();
+      } else {
+        try_cached_reconnect();
+      }
     }
     return;
   }
