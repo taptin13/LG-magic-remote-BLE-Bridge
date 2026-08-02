@@ -327,11 +327,9 @@ final class AppModel: ObservableObject {
                 self?.mapper.reassertInputPipeline()
                 self?.syncPointerOverlay()
                 self?.pointerOverlay.recoverAfterDisplayChange()
-                /* BLE may still report Ready after sleep while the radio is quiet —
-                   nudge auto-reconnect if the session is gone. */
-                if self?.host.phase != .ready {
-                    self?.host.beginAutoConnect(reason: "system wake")
-                }
+                /* CoreBluetooth may retain a stale `.ready` phase after sleep;
+                   force a session rebind and retry after the radio settles. */
+                self?.host.recoverAfterSystemWake()
             }
         }
 

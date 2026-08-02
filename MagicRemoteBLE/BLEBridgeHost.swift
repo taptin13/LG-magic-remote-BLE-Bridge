@@ -50,6 +50,7 @@ final class BLEBridgeHost: NSObject, ObservableObject {
     /// Exponential reconnect backoff index (reset when `.ready`).
     private var reconnectAttempt = 0
     private static let reconnectBackoff: [TimeInterval] = [1, 2, 5, 10, 30]
+    private var wakeRecoveryGeneration: UInt64 = 0
     /// Keep the CoreBluetooth link warm — Sequoia often drops idle centrals (~15s)
     /// with CBError 6 when the peripheral is quiet (no button/motion notifies).
     private var linkKeepAliveTimer: Timer?
@@ -140,6 +141,32 @@ final class BLEBridgeHost: NSObject, ObservableObject {
         }
         log(.matrix, "Auto-connect — \(reason)")
         startScan()
+    }
+
+    /// CoreBluetooth can retain `.ready` across system sleep even though the
+    /// ATT session is no longer usable. Rebind the session after wake instead
+    /// of trusting the stale phase and waiting forever for a disconnect callback.
+    func recoverAfterSystemWake() {
+        guard autoConnect, !userStoppedAuto else { return }
+        wakeRecoveryGeneration &+= 1
+        let generation = wakeRecoveryGeneration
+        reconnectAttempt = 0
+        autoConnectScheduled = false
+        log(.matrix, "Recovering BLE after system wake")
+        if let p = active { central.cancelPeripheralConnection(p) }
+        stopScan()
+        clearSession(phase: .idle)
+
+        for delay in [1.0, 4.0] as [TimeInterval] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                guard let self,
+                      self.wakeRecoveryGeneration == generation,
+                      self.autoConnect,
+                      !self.userStoppedAuto,
+                      self.phase != .ready else { return }
+                self.beginAutoConnect(reason: "system wake retry")
+            }
+        }
     }
 
     func startScan() {
