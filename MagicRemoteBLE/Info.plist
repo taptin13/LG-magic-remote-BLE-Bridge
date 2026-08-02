@@ -16,7 +16,4 @@
 <key>NSPrincipalClass</key><string>NSApplication</string>
 <key>NSSupportsAutomaticTermination</key><false/>
 <key>NSSupportsSuddenTermination</key><false/>
-<!-- Menu-bar / accessory mode has no visible window — without this, App Nap
-     freezes CoreBluetooth + GCD after a few minutes of idle remote use. -->
-<key>NSAppSleepDisabled</key><true/>
 </dict></plist>

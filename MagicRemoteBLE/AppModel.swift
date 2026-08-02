@@ -114,13 +114,9 @@ final class AppModel: ObservableObject {
     private var lastPersistedMouseMode = false
     private var metricsTimer: Timer?
     private var metricsURL: URL?
-    /// Keeps the process out of App Nap while the bridge is Ready. Closing the
-    /// window puts us in `.accessory` with no visible UI — without this, macOS
-    /// naps the process after a few minutes of idle remote use and motion
-    /// stops until the user opens the window again.
+    /// Keeps BLE/input responsive while the bridge is Ready without preventing
+    /// macOS from entering idle system sleep.
     private var bridgeActivity: NSObjectProtocol?
-    /// Renews the activity assertion and marks cursor dirty after idle gaps.
-    private var napGuardTimer: Timer?
 
     /// Label pending Learn (shown in UI) — empty if Learn has no label.
     var learnPromptLabel: String { pendingLearnLabel }
@@ -304,45 +300,19 @@ final class AppModel: ObservableObject {
     private func updateBridgeActivity(active: Bool) {
         if active {
             if bridgeActivity == nil {
-                /* `.userInitiated` (not AllowingIdleSystemSleep) pairs with
-                   NSAppSleepDisabled — accessory menu-bar apps are App Nap magnets. */
+                /* Keep the accessory process responsive while allowing the Mac
+                   to sleep. Cursor recovery is event-driven on the next packet. */
                 bridgeActivity = ProcessInfo.processInfo.beginActivity(
-                    options: [.userInitiated, .latencyCritical],
+                    options: [.userInitiatedAllowingIdleSystemSleep],
                     reason: "MagicRemoteBLE bridge Ready — receive airmouse motion"
                 )
-            }
-            if napGuardTimer == nil {
-                let t = Timer.scheduledTimer(withTimeInterval: 8, repeats: true) { [weak self] _ in
-                    DispatchQueue.main.async {
-                        MainActor.assumeIsolated {
-                            self?.napGuardTick()
-                        }
-                    }
-                }
-                RunLoop.main.add(t, forMode: .common)
-                napGuardTimer = t
             }
         } else {
             if let bridgeActivity {
                 ProcessInfo.processInfo.endActivity(bridgeActivity)
                 self.bridgeActivity = nil
             }
-            napGuardTimer?.invalidate()
-            napGuardTimer = nil
         }
-    }
-
-    private func napGuardTick() {
-        guard host.phase == .ready else {
-            updateBridgeActivity(active: false)
-            return
-        }
-        /* Keep the assertion alive and arm cursor wake for the next remote packet
-           after a quiet spell — same effect as clicking the app window. */
-        if bridgeActivity == nil {
-            updateBridgeActivity(active: true)
-        }
-        mapper.armCursorWakeIfIdle(seconds: 3)
     }
 
     func syncPointerOverlay() {

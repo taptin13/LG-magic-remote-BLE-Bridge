@@ -89,6 +89,9 @@ final class InputMapper: ObservableObject {
     /// nil = mouseMoved; left/right/center = correct *Dragged type.
     private var pendingDragButton: CGMouseButton?
     private var smoothTimer: DispatchSourceTimer?
+    /// A one-shot timer is armed only while motion is pending. Keeping the
+    /// source alive avoids DispatchSource suspend/resume imbalance.
+    private var smoothTimerScheduled = false
     private var lastSmoothAt: CFAbsoluteTime = 0
     private var lastPointerActivityAt: CFAbsoluteTime = 0
     private let smoothQueue = DispatchQueue(label: "mr.mouse.smooth", qos: .userInteractive)
@@ -520,7 +523,7 @@ final class InputMapper: ObservableObject {
             pendingDragButton = dragBtn
             pendingVisualStartsNs.append(packet.receivedAtNs)
             lock.unlock()
-            ensureSmoothTimer()
+            armSmoothTimer()
         } else {
             if moveMouse(dx: gated.dx, dy: gated.dy, dragButton: dragBtn) {
                 PerformanceMetrics.shared.visualMotionPosted(receivedAtNs: [packet.receivedAtNs])
@@ -749,18 +752,45 @@ final class InputMapper: ObservableObject {
 
     private func ensureSmoothTimer() {
         lock.lock()
-        let need = smoothingFlag && enabledFlag && smoothTimer == nil
-        guard need else {
+        guard smoothTimer == nil else {
             lock.unlock()
             return
         }
         let t = DispatchSource.makeTimerSource(queue: smoothQueue)
-        // 4 ms cadence keeps first-visible latency below one 120 Hz frame.
-        t.schedule(deadline: .now(), repeating: .milliseconds(4), leeway: .microseconds(250))
         t.setEventHandler { [weak self] in self?.smoothTick() }
         smoothTimer = t
         lock.unlock()
         t.resume()
+    }
+
+    /// Arm one 4 ms smoothing step. The next step is armed by `smoothTick`
+    /// only if residual motion remains, so idle mapping has no periodic wakeup.
+    private func armSmoothTimer() {
+        ensureSmoothTimer()
+        lock.lock()
+        guard smoothingFlag, enabledFlag,
+              let timer = smoothTimer,
+              !smoothTimerScheduled else {
+            lock.unlock()
+            return
+        }
+        smoothTimerScheduled = true
+        lock.unlock()
+        timer.schedule(deadline: .now(), repeating: .never, leeway: .microseconds(250))
+    }
+
+    private func armNextSmoothTimerIfNeeded() {
+        lock.lock()
+        guard smoothingFlag, enabledFlag,
+              (pendingDX != 0 || pendingDY != 0),
+              let timer = smoothTimer,
+              !smoothTimerScheduled else {
+            lock.unlock()
+            return
+        }
+        smoothTimerScheduled = true
+        lock.unlock()
+        timer.schedule(deadline: .now() + .milliseconds(4), repeating: .never, leeway: .microseconds(250))
     }
 
     private func stopSmoothTimer() {
@@ -768,6 +798,7 @@ final class InputMapper: ObservableObject {
         let t = smoothTimer
         let dropped = pendingVisualStartsNs.count
         smoothTimer = nil
+        smoothTimerScheduled = false
         pendingDX = 0
         pendingDY = 0
         pendingVisualStartsNs.removeAll(keepingCapacity: true)
@@ -809,6 +840,7 @@ final class InputMapper: ObservableObject {
 
     private func smoothTick() {
         lock.lock()
+        smoothTimerScheduled = false
         let enabled = enabledFlag
         lock.unlock()
         guard enabled else { return }
@@ -875,6 +907,7 @@ final class InputMapper: ObservableObject {
         } else {
             PerformanceMetrics.shared.visualMotionDropped(starts.count)
         }
+        armNextSmoothTimerIfNeeded()
     }
     private func scroll(deltaY: Int32, native: Bool? = nil) {
         guard deltaY != 0 else { return }
