@@ -212,7 +212,15 @@ static bool name_is_remote(const uint8_t *name, uint8_t name_len) {
 static void on_notify(uint16_t attr_handle, const uint8_t *data, uint16_t len) {
   if (!s_dec || !data || len == 0) return;
   uint8_t rid = report_id_for(attr_handle);
-  if (rid == 0xFD && len >= 19) remote_decoder_on_fd(s_dec, data, len);
+  if (rid == 0xFD && len >= 19) {
+    int64_t started_us = esp_timer_get_time();
+    remote_decoder_on_fd(s_dec, data, len);
+    uint32_t elapsed_us = (uint32_t)(esp_timer_get_time() - started_us);
+    bridge_metrics_t *metrics = bridge_metrics();
+    metrics->remote_fd_count++;
+    metrics->decoder_total_us += elapsed_us;
+    if (elapsed_us > metrics->decoder_max_us) metrics->decoder_max_us = elapsed_us;
+  }
 }
 
 static void disconnect_remote(void) {

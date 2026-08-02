@@ -117,6 +117,68 @@ static void fd_set_gyro(uint8_t fd[19], int16_t gx, int16_t gy, int16_t gz) {
   }
 }
 
+static void fd_set_accel(uint8_t fd[19], int16_t ax, int16_t ay, int16_t az) {
+  int16_t accel[3] = {ax, ay, az};
+  for (int i = 0; i < 3; i++) {
+    uint16_t raw = (uint16_t)accel[i];
+    fd[10 + i * 2] = (uint8_t)(raw >> 8);
+    fd[11 + i * 2] = (uint8_t)raw;
+  }
+}
+
+static void drain_motion(long *dx, long *dy) {
+  bus_event_t ev;
+  while (event_bus_take(&ev, 0)) {
+    if (ev.type == BUS_MOTION) {
+      *dx += ev.u.motion.dx;
+      *dy += ev.u.motion.dy;
+    }
+  }
+}
+
+static void test_decoder_roll_compensation(void) {
+  event_bus_init();
+  remote_decoder_t *d = remote_decoder_create();
+  EXPECT(d != NULL);
+  remote_decoder_reset(d);
+  uint8_t fd[19] = {0};
+  fd[0] = 0xFD;
+
+  fd_set_accel(fd, 0, 0, 1000);
+  for (int i = 0; i < kCalibrationFrames; i++) {
+    fd_set_gyro(fd, 0, 0, 0);
+    remote_decoder_on_fd(d, fd, sizeof(fd));
+  }
+
+  long up_dx = 0, up_dy = 0;
+  for (int i = 0; i < 30; i++) {
+    fd_set_gyro(fd, 500, 0, 900);
+    remote_decoder_on_fd(d, fd, sizeof(fd));
+    drain_motion(&up_dx, &up_dy);
+  }
+
+  /* Roll 180 degrees: gravity and local gyro X/Z both reverse. */
+  fd_set_accel(fd, 0, 0, -1000);
+  for (int i = 0; i < 100; i++) {
+    fd_set_gyro(fd, 0, 0, 0);
+    remote_decoder_on_fd(d, fd, sizeof(fd));
+    long ignored_x = 0, ignored_y = 0;
+    drain_motion(&ignored_x, &ignored_y);
+  }
+  long down_dx = 0, down_dy = 0;
+  for (int i = 0; i < 30; i++) {
+    fd_set_gyro(fd, -500, 0, -900);
+    remote_decoder_on_fd(d, fd, sizeof(fd));
+    drain_motion(&down_dx, &down_dy);
+  }
+
+  EXPECT(up_dx > 0 && up_dy > 0);
+  EXPECT(down_dx > 0 && down_dy > 0);
+  EXPECT(labs(up_dx - down_dx) < labs(up_dx) / 5 + 2);
+  EXPECT(labs(up_dy - down_dy) < labs(up_dy) / 5 + 2);
+  free(d);
+}
+
 static void test_decoder_reconnect_calibration(void) {
   event_bus_init();
   remote_decoder_t *d = remote_decoder_create();
@@ -149,22 +211,8 @@ static void test_decoder_reconnect_calibration(void) {
   }
   EXPECT(saw_motion == 1);
 
-  /* Soft reconnect: motion blocked briefly; after still (quick) or timeout+fallback. */
+  /* Soft reconnect: preserve committed bias and accept motion immediately. */
   remote_decoder_reset_session(d);
-  saw_motion = 0;
-  fd_set_gyro(fd, 900, -20, 900);
-  remote_decoder_on_fd(d, fd, sizeof(fd));
-  while (event_bus_take(&ev, 0)) {
-    if (ev.type == BUS_MOTION && (ev.u.motion.dx || ev.u.motion.dy)) saw_motion = 1;
-  }
-  EXPECT(saw_motion == 0);
-
-  for (int i = 0; i < 30; i++) {
-    fd_set_gyro(fd, 100, -20, 80);
-    remote_decoder_on_fd(d, fd, sizeof(fd));
-  }
-  while (event_bus_take(&ev, 0)) {
-  }
   saw_motion = 0;
   fd_set_gyro(fd, 900, -20, 900);
   remote_decoder_on_fd(d, fd, sizeof(fd));
@@ -229,6 +277,7 @@ int main(void) {
   test_bridge_state();
   test_decoder_buttons();
   test_decoder_reconnect_calibration();
+  test_decoder_roll_compensation();
   test_decoder_slow_diagonal_direction();
   test_fault_inject();
   if (g_fail) {

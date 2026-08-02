@@ -1,5 +1,6 @@
 #include "mac_gatt.h"
 #include "ble_core.h"
+#include "bridge_metrics.h"
 #include "bridge_state.h"
 #include "config.h"
 #include "esp_log.h"
@@ -216,6 +217,8 @@ static int gap_event(struct ble_gap_event *event, void *arg) {
       return 0;
     case BLE_GAP_EVENT_DISCONNECT:
       ESP_LOGI(TAG, "DISCONNECT reason=%d", event->disconnect.reason);
+      bridge_metrics()->mac_disconnect_count++;
+      bridge_metrics()->mac_disconnect_reason = event->disconnect.reason;
       s_conn = BLE_HS_CONN_HANDLE_NONE;
       s_subscribed = false;
       s_encrypted = false;

@@ -490,7 +490,8 @@ static void drain_tx(int64_t budget_us) {
         if (it.gen == s_tx_gen) coalesce_motion_locked(&it.pkt, true);
         xSemaphoreGive(s_tx_mu);
       }
-      continue;
+      /* Link state is changing. Do not spin on the same relative motion. */
+      break;
     }
     if (bridge_fault_should_drop_tx()) {
       bridge_metrics()->tx_notify_fail++;
@@ -499,7 +500,7 @@ static void drain_tx(int64_t budget_us) {
         if (it.gen == s_tx_gen) coalesce_motion_locked(&it.pkt, true);
         xSemaphoreGive(s_tx_mu);
       }
-      continue;
+      break;
     }
     if (mac_gatt_notify_raw(&it.pkt)) {
       if (it.pkt.type == PKT_MOTION) bridge_metrics()->motion_notify_ok++;
@@ -512,7 +513,9 @@ static void drain_tx(int64_t budget_us) {
       xSemaphoreTake(s_tx_mu, portMAX_DELAY);
       if (it.gen == s_tx_gen) coalesce_motion_locked(&it.pkt, true);
       xSemaphoreGive(s_tx_mu);
-      continue;
+      /* Give NimBLE/controller a scheduling turn before retrying. Retrying in
+       * this 3ms drain budget can exhaust mbufs and starve both BLE links. */
+      break;
     }
     if (it.attempts + 1 >= BRIDGE_NOTIFY_MAX_RETRY) {
       if (it.pkt.type == PKT_BUTTON && it.pkt.u.button.down) {

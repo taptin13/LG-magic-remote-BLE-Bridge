@@ -119,21 +119,25 @@ static void heartbeat_task(void *arg) {
      * ("timed out unexpectedly") when there is no ATT traffic. */
     vTaskDelay(pdMS_TO_TICKS(2000));
     n++;
-    if (mac_gatt_mac_ready()) {
+    if ((n % 3u) == 0u && mac_gatt_mac_ready()) {
       /* Re-notify current status — keeps the Mac↔ESP ATT path alive while the
-       * remote is quiet (no motion/button notifies). */
+       * remote is quiet (no motion/button notifies). Six seconds is frequent
+       * enough without competing with dual-role motion traffic every 2s. */
       mac_gatt_set_status(mac_gatt_current_status());
     }
     if ((n % 5u) == 0u) {
-      ESP_LOGI(TAG, "HB overall=%s rem=%s mac=%d/%d", bridge_state_overall_name(),
+      ESP_LOGI(TAG, "HB overall=%s rem=%s mac=%d/%d stack_free=%uW", bridge_state_overall_name(),
                remote_manager_state_name(), (int)mac_gatt_mac_connected(),
-               (int)mac_gatt_mac_ready());
+               (int)mac_gatt_mac_ready(), (unsigned)uxTaskGetStackHighWaterMark(NULL));
       bridge_metrics_log();
     }
   }
 }
 
 void app_main(void) {
+  /* Per-notify NimBLE INFO logs can exceed the motion rate and waste CPU/UART
+   * bandwidth. Keep our bridge INFO logs, but only emit NimBLE warnings. */
+  esp_log_level_set("NimBLE", ESP_LOG_WARN);
   ESP_LOGI(TAG, "========================================");
   ESP_LOGI(TAG, "MR-Proxy ESP-IDF + NimBLE");
   ESP_LOGI(TAG, "  BleCoreTask — dual-role owner");
@@ -180,7 +184,9 @@ void app_main(void) {
 
   ble_core_start();
   mac_bridge_start();
-  xTaskCreate(heartbeat_task, "hb", 2048, NULL, 1, NULL);
+  /* ESP_LOG formatting plus metrics previously overflowed the 2KB task stack,
+   * rebooting the bridge every heartbeat interval. Keep measured headroom. */
+  xTaskCreate(heartbeat_task, "hb", 4096, NULL, 1, NULL);
 
   ESP_LOGI(TAG, "Wait Mac Connect \"%s\" then remote SCAN", PROXY_NAME);
 }

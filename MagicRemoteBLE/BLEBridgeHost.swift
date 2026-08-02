@@ -243,9 +243,10 @@ final class BLEBridgeHost: NSObject, ObservableObject {
     private func startLinkKeepAlive() {
         stopLinkKeepAlive()
         linkKeepAliveTicks = 0
-        /* 2s ≪ Sequoia’s ~15s idle drop. Timer schedules on main; CB I/O must
-           run on `bleQueue` (the central’s queue) or reads/writes are ignored. */
-        let t = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+        /* One sparse ATT ping is enough to verify liveness. Avoid stacking a
+           write, RSSI read and status read every 2s: ESP32 is dual-role and
+           that traffic can collide with the high-rate remote notify path. */
+        let t = Timer.scheduledTimer(withTimeInterval: 8.0, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.linkKeepAliveTick()
             }
@@ -267,7 +268,6 @@ final class BLEBridgeHost: NSObject, ObservableObject {
             stopLinkKeepAlive()
             return
         }
-        let status = statusChar
         let cmd = cmdChar
         linkKeepAliveTicks += 1
         let tick = linkKeepAliveTicks
@@ -275,10 +275,6 @@ final class BLEBridgeHost: NSObject, ObservableObject {
             /* Central→peripheral traffic is what Sequoia needs to keep the link. */
             if let cmd {
                 p.writeValue(Data([0x03]), for: cmd, type: .withResponse)
-            }
-            p.readRSSI()
-            if let status {
-                p.readValue(for: status)
             }
         }
         /* Sparse log so we can confirm keepalive is alive without spam. */

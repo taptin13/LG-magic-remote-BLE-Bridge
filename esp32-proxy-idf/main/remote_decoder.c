@@ -13,29 +13,26 @@ static const char *TAG = "DEC";
 
 struct remote_decoder {
   float sens, thresh, soft_dead, tremor;
-  double gyro_lpf[3], gyro_bias[3], bias_sum[3];
-  double bias_min[3], bias_max[3];
-  double fallback_bias[3];
+  float gyro_lpf[3], gyro_bias[3], bias_sum[3];
+  float bias_min[3], bias_max[3];
+  float accel_sum[3], accel_lpf[3];
+  float gravity_ref_x, gravity_ref_z;
+  float orient_cos, orient_sin;
   int bias_samples;
-  int calib_age;
-  bool calibrating, have_bias, have_fallback, pointer_mode;
-  double carry_x, carry_y;
+  bool calibrating, have_bias, accel_ready, gravity_ref_valid, pointer_mode;
+  float carry_x, carry_y;
   int still_samples;
   uint16_t last_btn;
 };
 
 static const int kBiasWarmup = 60;
-/* Re-lock after reconnect can be shorter — we already have a fallback bias. */
-static const int kBiasWarmupQuick = 30;
-/* ~2s at ~100Hz FD. If the user keeps waving, restore last good bias instead of
- * inventing a provisional zero-point (which makes the cursor run by itself). */
-static const int kBiasFallbackTimeout = 200;
 /* Reject calibration windows containing hand movement. Raw gyro noise while
  * stationary is well below this span; a moving reconnect starts a fresh
  * window and calibrates automatically once the remote is held still. */
-static const double kBiasStableSpan = 90.0;
-static const double kLpf = 0.42;
-static const double kStill = 70.0;
+static const float kBiasStableSpan = 90.0f;
+static const float kLpf = 0.42f;
+static const float kGravityLpf = 0.08f;
+static const float kStill = 70.0f;
 /* ~80ms still (FD ~100Hz) before clearing fractional carry. */
 static const int kStillClearSamples = 8;
 
@@ -51,8 +48,8 @@ static void clear_calib_window(remote_decoder_t *d) {
   memset(d->bias_sum, 0, sizeof(d->bias_sum));
   memset(d->bias_min, 0, sizeof(d->bias_min));
   memset(d->bias_max, 0, sizeof(d->bias_max));
+  memset(d->accel_sum, 0, sizeof(d->accel_sum));
   d->bias_samples = 0;
-  d->calib_age = 0;
 }
 
 remote_decoder_t *remote_decoder_create(void) {
@@ -64,36 +61,33 @@ remote_decoder_t *remote_decoder_create(void) {
   d->tremor = 0.35f; /* mild hand-shake reduction by default */
   d->calibrating = true;
   d->have_bias = false;
-  d->have_fallback = false;
   return d;
 }
 
 void remote_decoder_reset(remote_decoder_t *d) {
   if (!d) return;
   memset(d->gyro_bias, 0, sizeof(d->gyro_bias));
-  memset(d->fallback_bias, 0, sizeof(d->fallback_bias));
+  memset(d->accel_lpf, 0, sizeof(d->accel_lpf));
   clear_calib_window(d);
   d->calibrating = true;
   d->have_bias = false;
-  d->have_fallback = false;
+  d->accel_ready = false;
+  d->gravity_ref_valid = false;
+  d->gravity_ref_x = 0;
+  d->gravity_ref_z = 0;
+  d->orient_cos = 1;
+  d->orient_sin = 0;
   clear_motion_transients(d);
 }
 
 void remote_decoder_reset_session(remote_decoder_t *d) {
   if (!d) return;
-  /* Keep last committed bias as fallback, but block motion until a still
-   * window re-locks (or timeout restores the fallback). Emitting with a
-   * stale/provisional bias is what made the cursor run by itself. */
-  if (d->have_bias) {
-    d->fallback_bias[0] = d->gyro_bias[0];
-    d->fallback_bias[1] = d->gyro_bias[1];
-    d->fallback_bias[2] = d->gyro_bias[2];
-    d->have_fallback = true;
-  } else {
-    d->have_fallback = false;
-  }
+  /* A reconnect must not block cursor input. Keep the last committed bias and
+   * reset only transient filter/carry state. The normal stillness adaptation
+   * below will track slow temperature drift without a visible dead period.
+   * If boot calibration has never completed, continue waiting for a safe bias. */
   clear_calib_window(d);
-  d->calibrating = true;
+  d->calibrating = !d->have_bias;
   clear_motion_transients(d);
 }
 
@@ -118,14 +112,14 @@ void remote_decoder_set_tremor(remote_decoder_t *d, float tremor) {
  * and makes the weaker axis flicker across the deadzone — the pointer then walks a
  * zigzag instead of a straight line. Scaling both axes by one factor derived from
  * the vector length keeps the direction exact at every speed. */
-static void soft_vector(double dead, double vx, double vy, double *ox, double *oy) {
-  double mag = sqrt(vx * vx + vy * vy);
+static void soft_vector(float dead, float vx, float vy, float *ox, float *oy) {
+  float mag = sqrtf(vx * vx + vy * vy);
   if (mag <= dead) {
     *ox = 0;
     *oy = 0;
     return;
   }
-  double s = (mag - dead) / (mag + dead);
+  float s = (mag - dead) / (mag + dead);
   *ox = vx * s;
   *oy = vy * s;
 }
@@ -152,14 +146,14 @@ void remote_decoder_on_fd(remote_decoder_t *d, const uint8_t *p, size_t len) {
     uint16_t raw = ((uint16_t)p[4 + i * 2] << 8) | p[5 + i * 2];
     imu[i] = (int16_t)raw;
   }
-  double gx = imu[0], gy = imu[1], gz = imu[2];
+  float gx = imu[0], gy = imu[1], gz = imu[2];
+  float ax = imu[3], ay = imu[4], az = imu[5];
   /* FD layout (matches esp32-hid-dongle / ProtocolAnalyzer):
    * p[16..17]=button BE, p[18]=wheel — NOT p[16]=wheel. */
   uint16_t btn = ((uint16_t)p[16] << 8) | p[17];
   int8_t wheel = (int8_t)p[18];
 
   if (d->calibrating) {
-    d->calib_age++;
     if (d->bias_samples == 0) {
       d->bias_min[0] = d->bias_max[0] = gx;
       d->bias_min[1] = d->bias_max[1] = gy;
@@ -180,6 +174,9 @@ void remote_decoder_on_fd(remote_decoder_t *d, const uint8_t *p, size_t len) {
       d->bias_sum[0] = gx;
       d->bias_sum[1] = gy;
       d->bias_sum[2] = gz;
+      d->accel_sum[0] = ax;
+      d->accel_sum[1] = ay;
+      d->accel_sum[2] = az;
       d->bias_min[0] = d->bias_max[0] = gx;
       d->bias_min[1] = d->bias_max[1] = gy;
       d->bias_min[2] = d->bias_max[2] = gz;
@@ -188,12 +185,28 @@ void remote_decoder_on_fd(remote_decoder_t *d, const uint8_t *p, size_t len) {
       d->bias_sum[0] += gx;
       d->bias_sum[1] += gy;
       d->bias_sum[2] += gz;
+      d->accel_sum[0] += ax;
+      d->accel_sum[1] += ay;
+      d->accel_sum[2] += az;
       d->bias_samples++;
-      int need = d->have_fallback ? kBiasWarmupQuick : kBiasWarmup;
-      if (d->bias_samples >= need) {
+      if (d->bias_samples >= kBiasWarmup) {
         d->gyro_bias[0] = d->bias_sum[0] / d->bias_samples;
         d->gyro_bias[1] = d->bias_sum[1] / d->bias_samples;
         d->gyro_bias[2] = d->bias_sum[2] / d->bias_samples;
+        float ref_x = d->accel_sum[0] / d->bias_samples;
+        float ref_z = d->accel_sum[2] / d->bias_samples;
+        float ref_norm = hypotf(ref_x, ref_z);
+        if (ref_norm > 64.0f) {
+          d->gravity_ref_x = ref_x / ref_norm;
+          d->gravity_ref_z = ref_z / ref_norm;
+          d->gravity_ref_valid = true;
+          d->orient_cos = 1;
+          d->orient_sin = 0;
+        }
+        d->accel_lpf[0] = ax;
+        d->accel_lpf[1] = ay;
+        d->accel_lpf[2] = az;
+        d->accel_ready = true;
         d->calibrating = false;
         d->have_bias = true;
 #ifndef HOST_TEST
@@ -202,51 +215,76 @@ void remote_decoder_on_fd(remote_decoder_t *d, const uint8_t *p, size_t len) {
       }
     }
 
-    /* Waving after reconnect: restore last good bias instead of inventing one. */
-    if (d->calibrating && d->have_fallback && d->calib_age >= kBiasFallbackTimeout) {
-      d->gyro_bias[0] = d->fallback_bias[0];
-      d->gyro_bias[1] = d->fallback_bias[1];
-      d->gyro_bias[2] = d->fallback_bias[2];
-      d->calibrating = false;
-      d->have_bias = true;
-#ifndef HOST_TEST
-      ESP_LOGW(TAG, "gyro bias fallback (no still window)");
-#endif
-    }
-
     /* No motion while calibrating — provisional bias made the cursor run wild. */
     goto decode_buttons;
   }
 
   {
-    double cx = gx - d->gyro_bias[0];
-    double cy = gy - d->gyro_bias[1];
-    double cz = gz - d->gyro_bias[2];
+    if (!d->accel_ready) {
+      d->accel_lpf[0] = ax;
+      d->accel_lpf[1] = ay;
+      d->accel_lpf[2] = az;
+      d->accel_ready = true;
+    } else {
+      d->accel_lpf[0] = kGravityLpf * ax + (1.0f - kGravityLpf) * d->accel_lpf[0];
+      d->accel_lpf[1] = kGravityLpf * ay + (1.0f - kGravityLpf) * d->accel_lpf[1];
+      d->accel_lpf[2] = kGravityLpf * az + (1.0f - kGravityLpf) * d->accel_lpf[2];
+    }
+
+    /* Gravity projected onto the X/Z plane gives roll around the remote's
+     * longitudinal Y axis. Rotate gyro X/Z back into the calibration frame so
+     * face-up, face-down and tilted grips produce the same screen directions. */
+    float accel_sq = d->accel_lpf[0] * d->accel_lpf[0] +
+                     d->accel_lpf[1] * d->accel_lpf[1] +
+                     d->accel_lpf[2] * d->accel_lpf[2];
+    float proj_sq = d->accel_lpf[0] * d->accel_lpf[0] +
+                    d->accel_lpf[2] * d->accel_lpf[2];
+    if (proj_sq > 64.0f * 64.0f && proj_sq > accel_sq * 0.04f) {
+      float proj_norm = sqrtf(proj_sq);
+      float cur_x = d->accel_lpf[0] / proj_norm;
+      float cur_z = d->accel_lpf[2] / proj_norm;
+      if (!d->gravity_ref_valid) {
+        d->gravity_ref_x = cur_x;
+        d->gravity_ref_z = cur_z;
+        d->gravity_ref_valid = true;
+      }
+      d->orient_cos = d->gravity_ref_x * cur_x + d->gravity_ref_z * cur_z;
+      d->orient_sin = d->gravity_ref_z * cur_x - d->gravity_ref_x * cur_z;
+    }
+
+    float cx = gx - d->gyro_bias[0];
+    float cy = gy - d->gyro_bias[1];
+    float cz = gz - d->gyro_bias[2];
     /* Light bias when still (like Studio) — avoids "snap" on slow drags. */
-    if (fabs(cx) < kStill && fabs(cz) < kStill) {
-      const double b = 0.0015;
-      d->gyro_bias[0] = (1 - b) * d->gyro_bias[0] + b * gx;
-      d->gyro_bias[1] = (1 - b) * d->gyro_bias[1] + b * gy;
-      d->gyro_bias[2] = (1 - b) * d->gyro_bias[2] + b * gz;
+    if (fabsf(cx) < kStill && fabsf(cz) < kStill) {
+      const float b = 0.0015f;
+      d->gyro_bias[0] = (1.0f - b) * d->gyro_bias[0] + b * gx;
+      d->gyro_bias[1] = (1.0f - b) * d->gyro_bias[1] + b * gy;
+      d->gyro_bias[2] = (1.0f - b) * d->gyro_bias[2] + b * gz;
       cx = gx - d->gyro_bias[0];
       cy = gy - d->gyro_bias[1];
       cz = gz - d->gyro_bias[2];
     }
     /* Tremor↑ → heavier LPF (less high-frequency hand shake). Floor keeps
      * intentional flicks responsive even at max tremor. */
-    double lpf = kLpf * (1.0 - 0.70 * (double)d->tremor);
-    if (lpf < 0.12) lpf = 0.12;
-    d->gyro_lpf[0] = lpf * cx + (1 - lpf) * d->gyro_lpf[0];
-    d->gyro_lpf[1] = lpf * cy + (1 - lpf) * d->gyro_lpf[1];
-    d->gyro_lpf[2] = lpf * cz + (1 - lpf) * d->gyro_lpf[2];
+    float lpf = kLpf * (1.0f - 0.70f * d->tremor);
+    if (lpf < 0.12f) lpf = 0.12f;
+    d->gyro_lpf[0] = lpf * cx + (1.0f - lpf) * d->gyro_lpf[0];
+    d->gyro_lpf[1] = lpf * cy + (1.0f - lpf) * d->gyro_lpf[1];
+    d->gyro_lpf[2] = lpf * cz + (1.0f - lpf) * d->gyro_lpf[2];
+
+    float oriented_gz = d->gyro_lpf[2] * d->orient_cos +
+                        d->gyro_lpf[0] * d->orient_sin;
+    float oriented_gx = d->gyro_lpf[0] * d->orient_cos -
+                        d->gyro_lpf[2] * d->orient_sin;
 
     /* Boost deadzone with tremor so tiny shakes never leave the knee. */
-    double dead = (double)d->soft_dead * (1.0 + 1.25 * (double)d->tremor);
-    double sx, sy;
-    soft_vector(dead, d->gyro_lpf[2], d->gyro_lpf[0], &sx, &sy);
+    float dead = d->soft_dead * (1.0f + 1.25f * d->tremor);
+    float sx, sy;
+    soft_vector(dead, oriented_gz, oriented_gx, &sx, &sy);
     sx *= d->sens;
     sy *= d->sens;
-    if (fabs(d->gyro_lpf[0]) > d->thresh || fabs(d->gyro_lpf[2]) > d->thresh)
+    if (fabsf(oriented_gx) > d->thresh || fabsf(oriented_gz) > d->thresh)
       d->pointer_mode = true;
 
     if (sx == 0.0 && sy == 0.0) {
@@ -260,8 +298,8 @@ void remote_decoder_on_fd(remote_decoder_t *d, const uint8_t *p, size_t len) {
       d->still_samples = 0;
       d->carry_x += sx;
       d->carry_y += sy;
-      int idx = (int)trunc(d->carry_x);
-      int idy = (int)trunc(d->carry_y);
+      int idx = (int)truncf(d->carry_x);
+      int idy = (int)truncf(d->carry_y);
       d->carry_x -= idx;
       d->carry_y -= idy;
       if (idx || idy) {
