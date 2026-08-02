@@ -146,6 +146,8 @@ struct ConnectionView: View {
                         set: { model.host.setAutoConnect($0) }
                     ))
 
+                    Toggle("Performance diagnostics", isOn: $model.diagnosticsRecording)
+
                     Toggle(isOn: Binding(
                         get: { model.mapper.wantsEnabled },
                         set: {
@@ -161,7 +163,7 @@ struct ConnectionView: View {
                 } header: {
                     Text("Bridge")
                 } footer: {
-                    Text("Auto Scan → Connect when Bluetooth is on. Settings are saved automatically.")
+                    Text("Auto Scan → Connect when Bluetooth is on. Metrics are written only when diagnostics is enabled.")
                 }
 
                 Section {

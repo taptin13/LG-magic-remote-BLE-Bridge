@@ -2,6 +2,35 @@ import Foundation
 import Combine
 import AppKit
 
+private final class MetricsWriter: @unchecked Sendable {
+    fileprivate static let header =
+        "timestamp,rx_packets,rx_motion,rx_buttons,posted_motion,visual_dropped,parse_errors,seq_gap_packets,seq_discontinuities,visual_latency_avg_ms,visual_latency_p50_ms,visual_latency_p95_ms,visual_latency_p99_ms,visual_latency_max_ms\n"
+    fileprivate static let maxBytes: UInt64 = 5 * 1024 * 1024
+    fileprivate static var headerForValidation: String { header.trimmingCharacters(in: .newlines) }
+    fileprivate static var headerData: Data { header.data(using: .utf8)! }
+    private let queue = DispatchQueue(label: "mr.metrics", qos: .utility)
+
+    func append(to url: URL) {
+        queue.async {
+            let timestamp = ISO8601DateFormatter().string(from: Date())
+            let line = "\(timestamp),\(PerformanceMetrics.shared.csvLine())\n"
+            guard let data = line.data(using: .utf8) else { return }
+            let fm = FileManager.default
+            if let size = (try? fm.attributesOfItem(atPath: url.path)[.size]) as? UInt64,
+               size > Self.maxBytes {
+                let archive = url.deletingPathExtension().appendingPathExtension("1.csv")
+                try? fm.removeItem(at: archive)
+                try? fm.moveItem(at: url, to: archive)
+                try? Self.headerData.write(to: url, options: .atomic)
+            }
+            guard let handle = try? FileHandle(forWritingTo: url) else { return }
+            defer { try? handle.close() }
+            try? handle.seekToEnd()
+            try? handle.write(contentsOf: data)
+        }
+    }
+}
+
 @MainActor
 final class AppModel: ObservableObject {
     var host = BLEBridgeHost()
@@ -84,6 +113,18 @@ final class AppModel: ObservableObject {
             }
         }
     }
+    /// CSV recording is diagnostic-only; counters remain available in Activity.
+    @Published var diagnosticsRecording = false {
+        didSet {
+            guard !loadingPrefs else { return }
+            savePrefs()
+            if diagnosticsRecording {
+                startMetricsRecording()
+            } else {
+                stopMetricsRecording()
+            }
+        }
+    }
 
     let pointerOverlay = PointerOverlayController()
 
@@ -114,6 +155,7 @@ final class AppModel: ObservableObject {
     private var lastPersistedMouseMode = false
     private var metricsTimer: Timer?
     private var metricsURL: URL?
+    private let metricsWriter = MetricsWriter()
     /// Keeps BLE/input responsive while the bridge is Ready without preventing
     /// macOS from entering idle system sleep.
     private var bridgeActivity: NSObjectProtocol?
@@ -152,7 +194,7 @@ final class AppModel: ObservableObject {
             self?.keyMaps.first { $0.buttonCode == code }
         }
         mapper.updateMaps(keyMaps)
-        startMetricsRecording()
+        if diagnosticsRecording { startMetricsRecording() }
         mapper.onRemotePointerMark = { [weak self] in
             self?.pointerOverlay.markRemoteDriving()
         }
@@ -394,6 +436,7 @@ final class AppModel: ObservableObject {
     }
 
     private func startMetricsRecording() {
+        guard metricsTimer == nil else { return }
         let fm = FileManager.default
         let base = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("MagicRemoteBLE", isDirectory: true)
@@ -403,7 +446,7 @@ final class AppModel: ObservableObject {
         if fm.fileExists(atPath: url.path) {
             let firstLine = (try? String(contentsOf: url, encoding: .utf8))?
                 .split(whereSeparator: { $0.isNewline }).first.map(String.init)
-            let expectedHeader = Self.metricsHeader.trimmingCharacters(in: .newlines)
+            let expectedHeader = MetricsWriter.headerForValidation
             if firstLine != expectedHeader {
                 let stamp = Int(Date().timeIntervalSince1970)
                 let archive = base.appendingPathComponent("metrics-v1-\(stamp).csv")
@@ -417,49 +460,27 @@ final class AppModel: ObservableObject {
             }
         }
         if !fm.fileExists(atPath: url.path) {
-            _ = try? Self.metricsHeader.data(using: .utf8)?.write(to: url, options: .atomic)
+            _ = try? MetricsWriter.headerData.write(to: url, options: .atomic)
         }
-        host.log(.info, "Metrics recording → \(url.path)")
-        metricsTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
-            DispatchQueue.main.async {
-                MainActor.assumeIsolated {
-                    self?.recordMetrics()
-                }
-            }
+        host.log(.info, "Metrics recording enabled → \(url.path)")
+        metricsTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
+            self?.recordMetrics()
         }
         if let metricsTimer {
             RunLoop.main.add(metricsTimer, forMode: .common)
         }
     }
 
-    private static let metricsHeader =
-        "timestamp,rx_packets,rx_motion,rx_buttons,posted_motion,visual_dropped,parse_errors,seq_gap_packets,seq_discontinuities,visual_latency_avg_ms,visual_latency_p50_ms,visual_latency_p95_ms,visual_latency_p99_ms,visual_latency_max_ms\n"
-    /// A row every 5s runs forever — roll over instead of growing without bound.
-    private static let metricsMaxBytes: UInt64 = 5 * 1024 * 1024
+    private func stopMetricsRecording() {
+        metricsTimer?.invalidate()
+        metricsTimer = nil
+        host.log(.info, "Metrics recording disabled")
+    }
 
     private func recordMetrics() {
         guard let url = metricsURL else { return }
-        let line = "\(Self.metricsTimestampFormatter.string(from: Date())),\(PerformanceMetrics.shared.csvLine())\n"
-        guard let data = line.data(using: .utf8) else { return }
-        rotateMetricsIfNeeded(url: url)
-        guard let handle = try? FileHandle(forWritingTo: url) else { return }
-        defer { _ = try? handle.close() }
-        _ = try? handle.seekToEnd()
-        _ = try? handle.write(contentsOf: data)
+        metricsWriter.append(to: url)
     }
-
-    private func rotateMetricsIfNeeded(url: URL) {
-        let fm = FileManager.default
-        guard let size = (try? fm.attributesOfItem(atPath: url.path)[.size]) as? UInt64,
-              size > Self.metricsMaxBytes else { return }
-        let archive = url.deletingPathExtension().appendingPathExtension("1.csv")
-        try? fm.removeItem(at: archive)
-        try? fm.moveItem(at: url, to: archive)
-        _ = try? Self.metricsHeader.data(using: .utf8)?.write(to: url, options: .atomic)
-        host.log(.info, "Metrics rolled over → \(archive.lastPathComponent)")
-    }
-
-    private static let metricsTimestampFormatter = ISO8601DateFormatter()
 
     func startLearn(label: String = "") {
         learnTimeout?.cancel()
@@ -671,6 +692,7 @@ final class AppModel: ObservableObject {
         d.set(pointerSizePreset, forKey: PrefKey.pointerPreset)
         d.set(motionSmoothing, forKey: PrefKey.smooth)
         d.set(nativeScroll, forKey: PrefKey.nativeScroll)
+        d.set(diagnosticsRecording, forKey: PrefKey.diagnostics)
         d.set(mapper.wantsEnabled, forKey: PrefKey.mapEnabled)
         d.set(mapper.isMouseModeEnabled(), forKey: PrefKey.mouseMode)
         d.set(host.autoConnect, forKey: PrefKey.autoConnect)
@@ -717,6 +739,9 @@ final class AppModel: ObservableObject {
         }
         if d.object(forKey: PrefKey.nativeScroll) != nil {
             nativeScroll = d.bool(forKey: PrefKey.nativeScroll)
+        }
+        if d.object(forKey: PrefKey.diagnostics) != nil {
+            diagnosticsRecording = d.bool(forKey: PrefKey.diagnostics)
         }
 
         savedMapEnabled = d.object(forKey: PrefKey.mapEnabled) != nil
@@ -775,6 +800,7 @@ final class AppModel: ObservableObject {
         static let pointerPreset = "mrble.pointerPreset"
         static let smooth = "mrble.smooth"
         static let nativeScroll = "mrble.nativeScroll"
+        static let diagnostics = "mrble.diagnostics"
         static let mapEnabled = "mrble.mapEnabled"
         static let mouseMode = "mrble.mouseMode"
         static let autoConnect = "mrble.autoConnect"
