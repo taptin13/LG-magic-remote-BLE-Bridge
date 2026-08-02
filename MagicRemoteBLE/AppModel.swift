@@ -430,6 +430,22 @@ final class AppModel: ObservableObject {
         _ = try? fm.createDirectory(at: base, withIntermediateDirectories: true)
         let url = base.appendingPathComponent("metrics.csv")
         metricsURL = url
+        if fm.fileExists(atPath: url.path) {
+            let firstLine = (try? String(contentsOf: url, encoding: .utf8))?
+                .split(whereSeparator: { $0.isNewline }).first.map(String.init)
+            let expectedHeader = Self.metricsHeader.trimmingCharacters(in: .newlines)
+            if firstLine != expectedHeader {
+                let stamp = Int(Date().timeIntervalSince1970)
+                let archive = base.appendingPathComponent("metrics-v1-\(stamp).csv")
+                if (try? fm.moveItem(at: url, to: archive)) != nil {
+                    host.log(.info, "Previous metrics archived → \(archive.lastPathComponent)")
+                } else {
+                    host.log(.error, "Metrics schema migration failed — recording disabled")
+                    metricsURL = nil
+                    return
+                }
+            }
+        }
         if !fm.fileExists(atPath: url.path) {
             _ = try? Self.metricsHeader.data(using: .utf8)?.write(to: url, options: .atomic)
         }
@@ -447,7 +463,7 @@ final class AppModel: ObservableObject {
     }
 
     private static let metricsHeader =
-        "timestamp,rx_packets,rx_motion,rx_buttons,posted_motion,parse_errors,latency_avg_ms,latency_max_ms\n"
+        "timestamp,rx_packets,rx_motion,rx_buttons,posted_motion,visual_dropped,parse_errors,seq_gap_packets,seq_discontinuities,visual_latency_avg_ms,visual_latency_p50_ms,visual_latency_p95_ms,visual_latency_p99_ms,visual_latency_max_ms\n"
     /// A row every 5s runs forever — roll over instead of growing without bound.
     private static let metricsMaxBytes: UInt64 = 5 * 1024 * 1024
 

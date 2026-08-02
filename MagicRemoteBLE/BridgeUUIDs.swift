@@ -38,6 +38,8 @@ struct BridgePacket {
     var buttonDown: Bool = false
     var battery: UInt8 = 0
     var status: UInt8 = 0
+    /// App-local monotonic timestamp; never serialized on the BLE wire.
+    var receivedAtNs: UInt64 = 0
 
     static func parse(_ data: Data) -> BridgePacket? {
         guard data.count >= 2, let type = BridgePktType(rawValue: data[0]) else { return nil }

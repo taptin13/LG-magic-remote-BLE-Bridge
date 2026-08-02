@@ -414,6 +414,7 @@ extension BLEBridgeHost: CBCentralManagerDelegate {
                 log(.info, "Ignoring stale didConnect for \(peripheral.identifier.uuidString.prefix(8))")
                 return
             }
+            PerformanceMetrics.shared.beginTransportSession()
             phase = .discovering
             log(.info, "Connected — discovering MR-Proxy service")
             peripheral.delegate = self
@@ -562,11 +563,11 @@ extension BLEBridgeHost: CBPeripheralDelegate {
             return
         }
         guard uuid == BridgeUUID.event || uuid == BridgeUUID.hid else { return }
-        guard let pkt = BridgePacket.parse(data) else {
+        guard var pkt = BridgePacket.parse(data) else {
             PerformanceMetrics.shared.parseError()
             return
         }
-        PerformanceMetrics.shared.received(pkt)
+        pkt.receivedAtNs = PerformanceMetrics.shared.received(pkt)
 
         /* Motion: inject on BLE queue only — no MainActor hop (smoother). */
         if pkt.type == .motion {

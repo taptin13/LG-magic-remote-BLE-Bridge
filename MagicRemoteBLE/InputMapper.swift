@@ -84,6 +84,8 @@ final class InputMapper: ObservableObject {
     /// Display-paced smoothing: jittery BLE packets → subdivide at ~125Hz.
     private var pendingDX = 0.0
     private var pendingDY = 0.0
+    /// BLE arrival times represented by the next visible smoothing step.
+    private var pendingVisualStartsNs: [UInt64] = []
     /// nil = mouseMoved; left/right/center = correct *Dragged type.
     private var pendingDragButton: CGMouseButton?
     private var smoothTimer: DispatchSourceTimer?
@@ -279,12 +281,15 @@ final class InputMapper: ObservableObject {
         clickSettleUntil = 0
         pendingDX = 0
         pendingDY = 0
+        let dropped = pendingVisualStartsNs.count
+        pendingVisualStartsNs.removeAll(keepingCapacity: true)
         pendingDragButton = nil
         let stuckButtons = mouseButtons
         if !on {
             mouseButtons = 0
         }
         lock.unlock()
+        PerformanceMetrics.shared.visualMotionDropped(dropped)
 
         if !on, stuckButtons != 0 {
             if (stuckButtons & 1) != 0 { mouseClick(button: .left, down: false) }
@@ -369,9 +374,12 @@ final class InputMapper: ObservableObject {
         virtualPosValid = false
         pendingDX = 0
         pendingDY = 0
+        let dropped = pendingVisualStartsNs.count
+        pendingVisualStartsNs.removeAll(keepingCapacity: true)
         pendingDragButton = nil
         lastWarpPixel = CGPoint(x: -1, y: -1)
         lock.unlock()
+        PerformanceMetrics.shared.visualMotionDropped(dropped)
     }
 
     /// After the remote has been quiet, the next motion must re-associate the
@@ -453,13 +461,14 @@ final class InputMapper: ObservableObject {
         let ok = enabledFlag && trustedFlag
         lock.unlock()
         guard ok else {
-            if packet.type == .motion { PerformanceMetrics.shared.motionSkipped() }
+            if packet.type == .motion && (packet.dx != 0 || packet.dy != 0) {
+                PerformanceMetrics.shared.visualMotionDropped()
+            }
             return
         }
         switch packet.type {
         case .motion:
-            defer { PerformanceMetrics.shared.motionHandled() }
-            applyMouse(dx: Int(packet.dx), dy: Int(packet.dy), wheel: Int(packet.wheel))
+            applyMouse(packet)
         case .button:
             applyButton(code: packet.buttonCode, down: packet.buttonDown)
         case .voice:
@@ -469,7 +478,8 @@ final class InputMapper: ObservableObject {
         }
     }
 
-    private func applyMouse(dx: Int, dy: Int, wheel: Int) {
+    private func applyMouse(_ packet: BridgePacket) {
+        let dx = Int(packet.dx), dy = Int(packet.dy), wheel = Int(packet.wheel)
         lock.lock()
         let mouseOn = mouseModeFlag
         let dragBtn = Self.dragButton(from: mouseButtons)
@@ -486,14 +496,20 @@ final class InputMapper: ObservableObject {
         }
 
         /* Air mouse off → swallow dx/dy. */
-        guard mouseOn, dx != 0 || dy != 0 else { return }
+        guard dx != 0 || dy != 0 else { return }
+        guard mouseOn else {
+            PerformanceMetrics.shared.visualMotionDropped()
+            return
+        }
 
         let holding = dragBtn != nil
         if holding && !allowDragMotion(dx: Double(dx), dy: Double(dy)) {
             discardPendingMotion()
+            PerformanceMetrics.shared.visualMotionDropped()
             return
         }
         guard let gated = gatedMotion(dx: Double(dx), dy: Double(dy)) else {
+            PerformanceMetrics.shared.visualMotionDropped()
             return
         }
 
@@ -502,10 +518,15 @@ final class InputMapper: ObservableObject {
             pendingDX = Self.clampPending(pendingDX + gated.dx)
             pendingDY = Self.clampPending(pendingDY + gated.dy)
             pendingDragButton = dragBtn
+            pendingVisualStartsNs.append(packet.receivedAtNs)
             lock.unlock()
             ensureSmoothTimer()
         } else {
-            moveMouse(dx: gated.dx, dy: gated.dy, dragButton: dragBtn)
+            if moveMouse(dx: gated.dx, dy: gated.dy, dragButton: dragBtn) {
+                PerformanceMetrics.shared.visualMotionPosted(receivedAtNs: [packet.receivedAtNs])
+            } else {
+                PerformanceMetrics.shared.visualMotionDropped()
+            }
         }
     }
 
@@ -746,32 +767,45 @@ final class InputMapper: ObservableObject {
     private func stopSmoothTimer() {
         lock.lock()
         let t = smoothTimer
+        let dropped = pendingVisualStartsNs.count
         smoothTimer = nil
         pendingDX = 0
         pendingDY = 0
+        pendingVisualStartsNs.removeAll(keepingCapacity: true)
         pendingDragButton = nil
         lastSmoothAt = 0
         virtualPosValid = false
         lock.unlock()
+        PerformanceMetrics.shared.visualMotionDropped(dropped)
         t?.cancel()
     }
 
     private func flushPendingMotion() {
         lock.lock()
         let dx = pendingDX, dy = pendingDY, drag = pendingDragButton
+        let starts = pendingVisualStartsNs
         pendingDX = 0
         pendingDY = 0
+        pendingVisualStartsNs.removeAll(keepingCapacity: true)
         pendingDragButton = nil
         lock.unlock()
-        if dx != 0 || dy != 0 { moveMouse(dx: dx, dy: dy, dragButton: drag) }
+        if dx != 0 || dy != 0,
+           moveMouse(dx: dx, dy: dy, dragButton: drag) {
+            PerformanceMetrics.shared.visualMotionPosted(receivedAtNs: starts)
+        } else {
+            PerformanceMetrics.shared.visualMotionDropped(starts.count)
+        }
     }
 
     private func discardPendingMotion() {
         lock.lock()
+        let dropped = pendingVisualStartsNs.count
         pendingDX = 0
         pendingDY = 0
+        pendingVisualStartsNs.removeAll(keepingCapacity: true)
         pendingDragButton = nil
         lock.unlock()
+        PerformanceMetrics.shared.visualMotionDropped(dropped)
     }
 
     private func smoothTick() {
@@ -782,9 +816,12 @@ final class InputMapper: ObservableObject {
         lock.lock()
         let now = CFAbsoluteTimeGetCurrent()
         if now < hardLockUntil || now < softFreezeUntil {
+            let dropped = pendingVisualStartsNs.count
             pendingDX = 0
             pendingDY = 0
+            pendingVisualStartsNs.removeAll(keepingCapacity: true)
             lock.unlock()
+            PerformanceMetrics.shared.visualMotionDropped(dropped)
             return
         }
         let dx = pendingDX
@@ -819,6 +856,8 @@ final class InputMapper: ObservableObject {
             pendingDY -= stepY
         }
         let gateUntil = postGateUntil
+        let starts = pendingVisualStartsNs
+        pendingVisualStartsNs.removeAll(keepingCapacity: true)
         lock.unlock()
 
         var outX = stepX, outY = stepY
@@ -829,7 +868,13 @@ final class InputMapper: ObservableObject {
             outY *= gateGain
         }
         if outX != 0 || outY != 0 {
-            moveMouse(dx: outX, dy: outY, dragButton: drag)
+            if moveMouse(dx: outX, dy: outY, dragButton: drag) {
+                PerformanceMetrics.shared.visualMotionPosted(receivedAtNs: starts)
+            } else {
+                PerformanceMetrics.shared.visualMotionDropped(starts.count)
+            }
+        } else {
+            PerformanceMetrics.shared.visualMotionDropped(starts.count)
         }
     }
     private func scroll(deltaY: Int32, native: Bool? = nil) {
@@ -875,7 +920,10 @@ final class InputMapper: ObservableObject {
         lastBreakDY = 0
         pendingDX = 0
         pendingDY = 0
+        let dropped = pendingVisualStartsNs.count
+        pendingVisualStartsNs.removeAll(keepingCapacity: true)
         lock.unlock()
+        PerformanceMetrics.shared.visualMotionDropped(dropped)
     }
 
     private func inDoubleClickWindow() -> Bool {
@@ -895,14 +943,17 @@ final class InputMapper: ObservableObject {
     /// `nil` = swallow; non-nil = motion after post-gate gain applied.
     private func gatedMotion(dx: Double, dy: Double) -> (dx: Double, dy: Double)? {
         lock.lock()
-        defer { lock.unlock() }
         let now = CFAbsoluteTimeGetCurrent()
         let mag = hypot(dx, dy)
 
         if now < hardLockUntil {
+            let dropped = pendingVisualStartsNs.count
             pendingDX = 0
             pendingDY = 0
+            pendingVisualStartsNs.removeAll(keepingCapacity: true)
             coherentBreakAccum = 0
+            lock.unlock()
+            PerformanceMetrics.shared.visualMotionDropped(dropped)
             return nil
         }
 
@@ -923,15 +974,22 @@ final class InputMapper: ObservableObject {
                     lastBreakDY = dy
                 }
                 if coherentBreakAccum < Self.coherentBreakThreshold {
+                    let dropped = pendingVisualStartsNs.count
                     pendingDX = 0
                     pendingDY = 0
+                    pendingVisualStartsNs.removeAll(keepingCapacity: true)
+                    lock.unlock()
+                    PerformanceMetrics.shared.visualMotionDropped(dropped)
                     return nil
                 }
                 clearFreezeLocked(now: now)
             }
         } else {
             coherentBreakAccum = 0
-            if mag < Self.motionGateEpsilon { return nil }
+            if mag < Self.motionGateEpsilon {
+                lock.unlock()
+                return nil
+            }
         }
 
         var outDX = dx, outDY = dy
@@ -941,6 +999,7 @@ final class InputMapper: ObservableObject {
             outDX *= gain
             outDY *= gain
         }
+        lock.unlock()
         return (outDX, outDY)
     }
 
@@ -960,7 +1019,10 @@ final class InputMapper: ObservableObject {
         clickSettleUntil = CFAbsoluteTimeGetCurrent() + Self.clickSettleSec
         pendingDX = 0
         pendingDY = 0
+        let dropped = pendingVisualStartsNs.count
+        pendingVisualStartsNs.removeAll(keepingCapacity: true)
         lock.unlock()
+        PerformanceMetrics.shared.visualMotionDropped(dropped)
     }
 
     private func endClickHold() {
@@ -970,7 +1032,10 @@ final class InputMapper: ObservableObject {
         clickSettleUntil = CFAbsoluteTimeGetCurrent() + Self.releaseHardSec
         pendingDX = 0
         pendingDY = 0
+        let dropped = pendingVisualStartsNs.count
+        pendingVisualStartsNs.removeAll(keepingCapacity: true)
         lock.unlock()
+        PerformanceMetrics.shared.visualMotionDropped(dropped)
     }
 
     /// `false` = swallow noise while pressing; `true` = passed threshold → allow drag.
@@ -1073,9 +1138,10 @@ final class InputMapper: ObservableObject {
         }
     }
 
-    private func moveMouse(dx: Double, dy: Double, dragButton: CGMouseButton?) {
+    @discardableResult
+    private func moveMouse(dx: Double, dy: Double, dragButton: CGMouseButton?) -> Bool {
         notePointerActivity()
-        guard dx.isFinite, dy.isFinite else { return }
+        guard dx.isFinite, dy.isFinite else { return false }
 
         lock.lock()
         let idleGap = lastMoveAt == 0 || (CFAbsoluteTimeGetCurrent() - lastMoveAt) > 0.8
@@ -1086,7 +1152,7 @@ final class InputMapper: ObservableObject {
         }
 
         /* CGEvent location is Quartz (Y down) and safe off MainActor — avoid NSEvent/NSScreen here. */
-        guard let probe = CGEvent(source: nil) else { return }
+        guard let probe = CGEvent(source: nil) else { return false }
         let actual = probe.location
         let desk = Self.desktopQuartzBounds()
         let now = CFAbsoluteTimeGetCurrent()
@@ -1144,7 +1210,7 @@ final class InputMapper: ObservableObject {
 
         let src = CGEventSource(stateID: .hidSystemState)
         src?.localEventsSuppressionInterval = 0
-        guard let ev = CGEvent(mouseEventSource: src, mouseType: type, mouseCursorPosition: pos, mouseButton: button) else { return }
+        guard let ev = CGEvent(mouseEventSource: src, mouseType: type, mouseCursorPosition: pos, mouseButton: button) else { return false }
         ev.setIntegerValueField(.mouseEventDeltaX, value: Int64((pos.x - actual.x).rounded()))
         ev.setIntegerValueField(.mouseEventDeltaY, value: Int64((pos.y - actual.y).rounded()))
         if type == .otherMouseDragged {
@@ -1152,6 +1218,7 @@ final class InputMapper: ObservableObject {
         }
         ev.post(tap: .cghidEventTap)
         PerformanceMetrics.shared.eventPosted()
+        return true
     }
     private func mouseClick(button: CGMouseButton, down: Bool) {
         /* Mark before posting — synthetic clicks hit our global monitors as mouseDown. */
