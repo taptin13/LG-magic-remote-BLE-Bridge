@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.1.1 — 2026-08-02
+## v0.1.2 — 2026-08-02
 
 ### Mac (`MagicRemoteBLE`)
 - Recover stale CoreBluetooth sessions after macOS system wake and retry
@@ -13,7 +13,7 @@
 - Auto-reconnect exponential backoff: 1s → 2s → 5s → 10s → 30s (reset on `.ready`)
 - `InputPacketSink` replaces bare `nonisolated(unsafe)` input callback
 - Pointer overlay: probe private CGS; fallback to `NSCursor.hide` + `CGDisplayHideCursor`
-- Version SoT: Info.plist uses `$(MARKETING_VERSION)` / `$(CURRENT_PROJECT_VERSION)` (0.1.1 / 3)
+- Version SoT: Info.plist uses `$(MARKETING_VERSION)` / `$(CURRENT_PROJECT_VERSION)` (0.1.2 / 3)
 - Signing: Automatic + team `7MHNHS24T2`, Hardened Runtime, Bluetooth entitlements
 - XCTest target `MagicRemoteBLETests` (packet parse + input sink)
 - Docs: `docs/RELEASE.md` (Developer ID + notarization still required for wide distribution)
