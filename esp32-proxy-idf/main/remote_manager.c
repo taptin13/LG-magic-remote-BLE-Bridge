@@ -64,6 +64,13 @@ static uint32_t s_disc_gen;
 /** Deferred NVS — do not commit flash inside BLE callback. */
 static bool s_nvs_dirty;
 static ble_addr_t s_nvs_addr;
+/* A Mac reconnect can leave the remote ATT handle looking alive after the
+ * controller missed the disconnect event during system sleep.  Rebind the
+ * remote session on the next Mac-ready edge instead of trusting that stale
+ * handle forever. */
+static uint32_t s_mac_link_gen_seen;
+static bool s_mac_ready_seen;
+static bool s_mac_rebind_pending;
 
 static const ble_uuid128_t uuid_d1ff = BLE_UUID128_INIT(REMOTE_D1FF_UUID128);
 static const ble_uuid16_t uuid_hid = BLE_UUID16_INIT(0x1812);
@@ -240,6 +247,32 @@ static void disconnect_remote(void) {
   s_disc_gen++;
   bridge_session_bump_remote();
   ble_core_cmd_release_buttons();
+}
+
+static void rebind_remote_after_mac_reconnect(void) {
+  if (!s_mac_rebind_pending) return;
+  s_mac_rebind_pending = false;
+
+  if (s_conn == BLE_HS_CONN_HANDLE_NONE && bridge_state_remote() != REM_READY) return;
+
+  ESP_LOGW(TAG, "Mac reconnected — rebind remote session after sleep");
+  if (s_conn != BLE_HS_CONN_HANDLE_NONE) {
+    disconnect_remote();
+  } else {
+    /* The controller retained a stale handle without delivering DISCONNECT. */
+    s_conn_gen++;
+    s_disc_gen++;
+    bridge_session_bump_remote();
+    reset_motion_session();
+    ble_core_cmd_release_buttons();
+  }
+  s_remote_drop = true;
+  s_disc_ok = false;
+  s_disc_fail = false;
+  s_recovery_next_scan = true;
+  s_reconnect_delay_ms = 300;
+  set_state(REM_RECOVERING);
+  mac_gatt_set_status(ST_REMOTE_DROP);
 }
 
 static bool disc_ctx_ok(const ble_disc_ctx_t *ctx, uint16_t conn_handle) {
@@ -731,6 +764,19 @@ void remote_manager_init(remote_decoder_t *decoder) {
 void remote_manager_tick(void) {
   flush_nvs_if_dirty();
 
+  bool mac_ready = mac_gatt_mac_ready();
+  uint32_t mac_link_gen = mac_gatt_link_gen();
+  if (mac_link_gen != s_mac_link_gen_seen) {
+    if (s_mac_link_gen_seen != 0 && s_mac_ready_seen) s_mac_rebind_pending = true;
+    s_mac_link_gen_seen = mac_link_gen;
+  }
+  if (mac_ready && !s_mac_ready_seen) {
+    if (s_mac_ready_seen || s_mac_rebind_pending) rebind_remote_after_mac_reconnect();
+    s_mac_ready_seen = true;
+  } else if (!mac_ready) {
+    s_mac_ready_seen = false;
+  }
+
   /* Refresh own addr after host sync */
   static bool addr_ok;
   if (!addr_ok) {
@@ -740,7 +786,7 @@ void remote_manager_tick(void) {
     }
   }
 
-  if (!mac_gatt_mac_ready()) {
+  if (!mac_ready) {
     if (bridge_state_remote() == REM_READY) {
       /* Keep remote link when app closes — reopen without re-pair. */
       return;
@@ -759,7 +805,7 @@ void remote_manager_tick(void) {
   }
 
   if (bridge_state_remote() == REM_WAIT_MAC) {
-    if (!mac_gatt_mac_ready()) return;
+    if (!mac_ready) return;
     if (s_conn != BLE_HS_CONN_HANDLE_NONE) {
       ESP_LOGI(TAG, "Mac back — remote still up");
       set_state(REM_READY);
@@ -812,7 +858,7 @@ void remote_manager_tick(void) {
   }
 
   if (bridge_state_remote() == REM_RECOVERING) {
-    if (!mac_gatt_mac_ready()) return;
+    if (!mac_ready) return;
     /* A stale drop flag must never launch scan/connect over a healthy link.
      * This previously produced BLE_HS_EALREADY while FD notifications were
      * still arriving from the already-connected remote. */
