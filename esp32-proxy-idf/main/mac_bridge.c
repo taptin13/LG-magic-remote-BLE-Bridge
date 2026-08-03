@@ -17,7 +17,9 @@ static void mac_bridge_task(void *arg) {
   ESP_LOGI(TAG, "task start (event_bus → ble_core)");
   for (;;) {
     bus_event_t ev;
-    if (!event_bus_take(&ev, 20)) continue;
+    /* Producers signal the event-bus semaphore for every event. Block until
+     * work arrives instead of polling every 20 ms while the bridge is idle. */
+    if (!event_bus_take(&ev, UINT32_MAX)) continue;
 
     bridge_packet_t pkt = {0};
     switch (ev.type) {

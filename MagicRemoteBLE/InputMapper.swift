@@ -126,6 +126,15 @@ final class InputMapper: ObservableObject {
     private static let pendingMotionCap: Double = 2048
     private static let pointerActivityMinInterval: CFTimeInterval = 1.0 / 45.0
 
+    /// XCTest launches the app as a test host on headless/ non-interactive
+    /// runners. WindowServer cursor association/warping is not a valid test
+    /// side effect and can terminate the host before the test bundle starts.
+    private static var isTestHost: Bool {
+        let env = ProcessInfo.processInfo.environment
+        return env["XCTestConfigurationFilePath"] != nil
+            || env["XCTestBundlePath"] != nil
+    }
+
     private static func smoothTau(forSpeed speed: Double) -> CFTimeInterval {
         // Keep low-speed motion stable without leaving a visible trailing
         // feel. Faster motion gets a shorter tau to remain responsive.
@@ -341,6 +350,12 @@ final class InputMapper: ObservableObject {
         lastWarpPixel = CGPoint(x: -1, y: -1)
         let mouseOn = mouseModeFlag
         lock.unlock()
+
+        /* Keep XCTest focused on packet/input logic. The real cursor pipeline
+           is exercised by the running app and requires an interactive
+           WindowServer session, which GitHub Actions may not provide. */
+        guard !Self.isTestHost else { return }
+
         if Thread.isMainThread {
             if mouseMode != mouseOn { mouseMode = mouseOn }
             appIsActiveFlag = NSApp.isActive

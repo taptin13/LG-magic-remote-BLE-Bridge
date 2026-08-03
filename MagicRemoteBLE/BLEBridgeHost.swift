@@ -43,6 +43,9 @@ final class BLEBridgeHost: NSObject, ObservableObject {
     /// User tapped Disconnect → no auto reconnect until Reconnect/Scan.
     private var userStoppedAuto = false
     private var pairingRecoveryRequired = false
+    /// A single automatic retry handles transient CoreBluetooth bond errors
+    /// after sleep. A second failure is treated as a real pairing mismatch.
+    private var pairingRecoveryAttempted = false
     private var autoConnectScheduled = false
     private var connectingID: UUID?
     /// Bumped on every session bind/clear — stale CoreBluetooth callbacks must ignore old gens.
@@ -54,6 +57,8 @@ final class BLEBridgeHost: NSObject, ObservableObject {
     private var reconnectAttempt = 0
     private static let reconnectBackoff: [TimeInterval] = [1, 2, 5, 10, 30]
     private var wakeRecoveryGeneration: UInt64 = 0
+    /// Invalidates delayed reconnect attempts across a CoreBluetooth radio reset.
+    private var radioRecoveryGeneration: UInt64 = 0
     /// Keep the CoreBluetooth link warm — Sequoia often drops idle centrals (~15s)
     /// with CBError 6 when the peripheral is quiet (no button/motion notifies).
     private var linkKeepAliveTimer: Timer?
@@ -112,6 +117,7 @@ final class BLEBridgeHost: NSObject, ObservableObject {
     func reconnect() {
         userStoppedAuto = false
         pairingRecoveryRequired = false
+        pairingRecoveryAttempted = false
         requiresPairingReset = false
         autoConnect = true
         reconnectAttempt = 0
@@ -127,6 +133,7 @@ final class BLEBridgeHost: NSObject, ObservableObject {
         if on {
             userStoppedAuto = false
             pairingRecoveryRequired = false
+            pairingRecoveryAttempted = false
             requiresPairingReset = false
             reconnectAttempt = 0
             beginAutoConnect(reason: "auto-connect on")
@@ -158,6 +165,9 @@ final class BLEBridgeHost: NSObject, ObservableObject {
         wakeRecoveryGeneration &+= 1
         let generation = wakeRecoveryGeneration
         reconnectAttempt = 0
+        pairingRecoveryAttempted = false
+        pairingRecoveryRequired = false
+        requiresPairingReset = false
         autoConnectScheduled = false
         log(.matrix, "Recovering BLE after system wake")
         if let p = active { central.cancelPeripheralConnection(p) }
@@ -171,7 +181,35 @@ final class BLEBridgeHost: NSObject, ObservableObject {
                       self.autoConnect,
                       !self.userStoppedAuto,
                       self.phase != .ready else { return }
-                self.beginAutoConnect(reason: "system wake retry")
+                if !self.connectPreferredIfAvailable() {
+                    self.beginAutoConnect(reason: "system wake retry")
+                }
+            }
+        }
+    }
+
+    /// CoreBluetooth can report poweredOn before the controller is ready to
+    /// scan/connect again after a sleep or radio reset. Prefer the cached
+    /// peripheral first; fall back to discovery when CoreBluetooth cannot
+    /// restore it from the identifier.
+    private func scheduleRadioRecovery() {
+        radioRecoveryGeneration &+= 1
+        let generation = radioRecoveryGeneration
+        autoConnectScheduled = false
+        for delay in [1.0, 4.0] as [TimeInterval] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                guard let self,
+                      self.radioRecoveryGeneration == generation,
+                      self.bluetoothOK,
+                      self.central.state == .poweredOn,
+                      self.autoConnect,
+                      !self.userStoppedAuto,
+                      self.phase != .ready,
+                      self.phase != .connecting,
+                      self.phase != .discovering else { return }
+                if !self.connectPreferredIfAvailable() {
+                    self.beginAutoConnect(reason: "Bluetooth radio stable")
+                }
             }
         }
     }
@@ -217,6 +255,19 @@ final class BLEBridgeHost: NSObject, ObservableObject {
             return
         }
         connect(peripheral: p)
+    }
+
+    @discardableResult
+    private func connectPreferredIfAvailable() -> Bool {
+        guard let id = preferredPeripheralID,
+              phase == .idle || phase == .failed else { return false }
+        guard let peripheral = central.retrievePeripherals(withIdentifiers: [id]).first else {
+            return false
+        }
+        peripherals[id] = peripheral
+        selectedID = id
+        connect(peripheral: peripheral)
+        return true
     }
 
     private func connect(peripheral: CBPeripheral) {
@@ -383,16 +434,18 @@ extension BLEBridgeHost: CBCentralManagerDelegate {
                 if phase != .ready && phase != .connecting && phase != .discovering {
                     phase = .idle
                 }
-                log(.ok, "Bluetooth: Powered on")
-                if autoConnect && !userStoppedAuto {
-                    beginAutoConnect(reason: "bluetooth on")
-                }
+                log(.ok, "Bluetooth: Powered on — waiting for radio to settle")
+                if autoConnect && !userStoppedAuto { scheduleRadioRecovery() }
             case .unauthorized:
                 bluetoothOK = false
                 phase = .poweredOff
                 log(.error, "Bluetooth: Unauthorized — allow MagicRemoteBLE in Privacy → Bluetooth")
             case .poweredOff:
                 bluetoothOK = false
+                radioRecoveryGeneration &+= 1
+                autoConnectScheduled = false
+                stopScan()
+                if active != nil || connectingID != nil { clearSession(phase: .poweredOff) }
                 phase = .poweredOff
                 log(.info, "Bluetooth: Powered off")
             case .unsupported:
@@ -401,6 +454,10 @@ extension BLEBridgeHost: CBCentralManagerDelegate {
                 log(.error, "Bluetooth: Unsupported on this Mac")
             case .resetting:
                 bluetoothOK = false
+                radioRecoveryGeneration &+= 1
+                autoConnectScheduled = false
+                stopScan()
+                if active != nil || connectingID != nil { clearSession(phase: .poweredOff) }
                 log(.info, "Bluetooth: Resetting…")
             case .unknown:
                 bluetoothOK = false
@@ -477,11 +534,21 @@ extension BLEBridgeHost: CBCentralManagerDelegate {
             log(.error, "Connect failed: \(msg)")
             if ns?.domain == CBError.errorDomain,
                ns?.code == CBError.peerRemovedPairingInformation.rawValue {
-                log(.error, "Bond Mac↔ESP mismatched (often after reflash). Bluetooth → Forget MR-Proxy, then Reconnect.")
                 preferredPeripheralID = nil
+                onPrefsChanged?()
+                if !pairingRecoveryAttempted {
+                    pairingRecoveryAttempted = true
+                    log(.info, "Pairing state reset by macOS — retrying once")
+                    clearSession(phase: .idle)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                        guard let self, self.autoConnect, !self.userStoppedAuto else { return }
+                        self.beginAutoConnect(reason: "pairing recovery")
+                    }
+                    return
+                }
                 pairingRecoveryRequired = true
                 requiresPairingReset = true
-                onPrefsChanged?()
+                log(.error, "Bond Mac↔ESP mismatched after retry. Bluetooth → Forget MR-Proxy, then Reconnect.")
             }
             clearSession(phase: .failed)
             scheduleAutoReconnect()
@@ -587,6 +654,9 @@ extension BLEBridgeHost: CBPeripheralDelegate {
             rememberPreferred(peripheral.identifier)
             userStoppedAuto = false
             resetReconnectBackoff()
+            pairingRecoveryAttempted = false
+            pairingRecoveryRequired = false
+            requiresPairingReset = false
             phase = .ready
             startLinkKeepAlive()
             log(.matrix, "Ready — Event notify OK")

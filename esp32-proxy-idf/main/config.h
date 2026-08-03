@@ -15,7 +15,7 @@
 
 /* Maximum idle wait for the BLE owner loop before checking work again. */
 #ifndef BLE_CORE_IDLE_WAIT_MS
-#define BLE_CORE_IDLE_WAIT_MS 2
+#define BLE_CORE_IDLE_WAIT_MS 10
 #endif
 
 /* Mac↔Proxy: require encrypted link (Just Works bond) before CMD write / ready.
