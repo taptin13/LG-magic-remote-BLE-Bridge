@@ -17,6 +17,7 @@ final class BLEBridgeHost: NSObject, ObservableObject {
     @Published var selectedID: UUID?
     @Published private(set) var remoteStatus = "—"
     @Published private(set) var batteryLevel: UInt8?
+    @Published private(set) var requiresPairingReset = false
     @Published private(set) var eventCount = 0
     @Published private(set) var logs: [LogEntry] = []
     /// When on: BT On → Scan → Connect automatically (and reconnect after disconnect).
@@ -41,6 +42,7 @@ final class BLEBridgeHost: NSObject, ObservableObject {
     private(set) var preferredPeripheralID: UUID?
     /// User tapped Disconnect → no auto reconnect until Reconnect/Scan.
     private var userStoppedAuto = false
+    private var pairingRecoveryRequired = false
     private var autoConnectScheduled = false
     private var connectingID: UUID?
     /// Bumped on every session bind/clear — stale CoreBluetooth callbacks must ignore old gens.
@@ -109,6 +111,8 @@ final class BLEBridgeHost: NSObject, ObservableObject {
     /// Start (or restart) auto Scan → Connect flow.
     func reconnect() {
         userStoppedAuto = false
+        pairingRecoveryRequired = false
+        requiresPairingReset = false
         autoConnect = true
         reconnectAttempt = 0
         onPrefsChanged?()
@@ -122,6 +126,8 @@ final class BLEBridgeHost: NSObject, ObservableObject {
         onPrefsChanged?()
         if on {
             userStoppedAuto = false
+            pairingRecoveryRequired = false
+            requiresPairingReset = false
             reconnectAttempt = 0
             beginAutoConnect(reason: "auto-connect on")
         } else {
@@ -333,7 +339,7 @@ final class BLEBridgeHost: NSObject, ObservableObject {
     }
 
     private func scheduleAutoReconnect() {
-        guard autoConnect, !userStoppedAuto, bluetoothOK else { return }
+        guard autoConnect, !userStoppedAuto, !pairingRecoveryRequired, bluetoothOK else { return }
         guard !autoConnectScheduled else { return }
         autoConnectScheduled = true
         let idx = min(reconnectAttempt, Self.reconnectBackoff.count - 1)
@@ -469,10 +475,12 @@ extension BLEBridgeHost: CBCentralManagerDelegate {
             let ns = error as NSError?
             let msg = error?.localizedDescription ?? "?"
             log(.error, "Connect failed: \(msg)")
-            // CBError.peerRemovedPairingInformation == 14
-            if ns?.domain == CBError.errorDomain, ns?.code == 14 {
+            if ns?.domain == CBError.errorDomain,
+               ns?.code == CBError.peerRemovedPairingInformation.rawValue {
                 log(.error, "Bond Mac↔ESP mismatched (often after reflash). Bluetooth → Forget MR-Proxy, then Reconnect.")
                 preferredPeripheralID = nil
+                pairingRecoveryRequired = true
+                requiresPairingReset = true
                 onPrefsChanged?()
             }
             clearSession(phase: .failed)

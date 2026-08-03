@@ -104,6 +104,11 @@ struct ConnectionView: View {
                     LabeledContent("Bridge") {
                         StatusBadge(text: phaseLabel, tone: phaseTone)
                     }
+                    if model.host.requiresPairingReset {
+                        Text("Pairing is out of sync. Forget MR-Proxy in System Settings → Bluetooth, then press Retry.")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    }
                     LabeledContent("Remote") {
                         Text(model.host.remoteStatus)
                             .foregroundStyle(.secondary)

@@ -22,15 +22,7 @@ struct MagicRemoteBLEApp: App {
             MenuBarStatusView()
                 .environmentObject(model)
         } label: {
-            HStack(spacing: 4) {
-                Image(systemName: MenuBarStatusSymbol.systemImage(for: model.host.phase))
-                if let battery = model.host.batteryLevel {
-                    Text("\(battery)%")
-                        .font(.caption2)
-                        .monospacedDigit()
-                }
-            }
-            .help("MagicRemoteBLE")
+            Label("MagicRemoteBLE", systemImage: MenuBarStatusSymbol.systemImage(for: model.host.phase))
         }
         .menuBarExtraStyle(.menu)
     }
