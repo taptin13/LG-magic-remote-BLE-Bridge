@@ -286,7 +286,7 @@ final class BLEBridgeHost: NSObject, ObservableObject {
            write, RSSI read and status read every 2s: ESP32 is dual-role and
            that traffic can collide with the high-rate remote notify path. */
         let t = Timer.scheduledTimer(withTimeInterval: 8.0, repeats: true) { [weak self] _ in
-            Task { @MainActor in
+            Task { @MainActor [weak self] in
                 self?.linkKeepAliveTick()
             }
         }
@@ -375,7 +375,7 @@ final class BLEBridgeHost: NSObject, ObservableObject {
 
 extension BLEBridgeHost: CBCentralManagerDelegate {
     nonisolated func centralManagerDidUpdateState(_ central: CBCentralManager) {
-        Task { @MainActor in
+        Task { @MainActor [self] in
             refreshAuthLabel()
             switch central.state {
             case .poweredOn:
@@ -437,7 +437,7 @@ extension BLEBridgeHost: CBCentralManagerDelegate {
             .contains(where: { $0 == BridgeUUID.service })
         guard name.contains("MR-Proxy") || name.contains("MR-BLE") || name == BridgeUUID.advertisedName || hasService else { return }
 
-        Task { @MainActor in
+        Task { @MainActor [self] in
             peripherals[peripheral.identifier] = peripheral
             let item = DiscoveredBridge(
                 id: peripheral.identifier,
@@ -456,7 +456,7 @@ extension BLEBridgeHost: CBCentralManagerDelegate {
     }
 
     nonisolated func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
-        Task { @MainActor in
+        Task { @MainActor [self] in
             guard isCurrentPeripheral(peripheral) else {
                 log(.info, "Ignoring stale didConnect for \(peripheral.identifier.uuidString.prefix(8))")
                 return
@@ -470,7 +470,7 @@ extension BLEBridgeHost: CBCentralManagerDelegate {
     }
 
     nonisolated func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
-        Task { @MainActor in
+        Task { @MainActor [self] in
             guard connectingID == peripheral.identifier || isCurrentPeripheral(peripheral) else { return }
             let ns = error as NSError?
             let msg = error?.localizedDescription ?? "?"
@@ -489,7 +489,7 @@ extension BLEBridgeHost: CBCentralManagerDelegate {
     }
 
     nonisolated func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
-        Task { @MainActor in
+        Task { @MainActor [self] in
             guard isCurrentPeripheral(peripheral) || connectingID == peripheral.identifier else { return }
             let unexpected = error != nil || !userStoppedAuto
             log(.info, "Disconnected \(error?.localizedDescription ?? "")")
@@ -503,7 +503,7 @@ extension BLEBridgeHost: CBCentralManagerDelegate {
 
 extension BLEBridgeHost: CBPeripheralDelegate {
     nonisolated func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
-        Task { @MainActor in
+        Task { @MainActor [self] in
             guard isCurrentPeripheral(peripheral) else { return }
             if let error {
                 log(.error, "Services: \(error.localizedDescription)")
@@ -525,7 +525,7 @@ extension BLEBridgeHost: CBPeripheralDelegate {
     }
 
     nonisolated func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
-        Task { @MainActor in
+        Task { @MainActor [self] in
             guard isCurrentPeripheral(peripheral) else { return }
             if let error {
                 log(.error, "Chars: \(error.localizedDescription)")
@@ -564,7 +564,7 @@ extension BLEBridgeHost: CBPeripheralDelegate {
         didUpdateNotificationStateFor characteristic: CBCharacteristic,
         error: Error?
     ) {
-        Task { @MainActor in
+        Task { @MainActor [self] in
             guard isCurrentPeripheral(peripheral) else { return }
             if let error {
                 log(.error, "Notify \(characteristic.uuid): \(error.localizedDescription)")
@@ -599,7 +599,7 @@ extension BLEBridgeHost: CBPeripheralDelegate {
         let uuid = characteristic.uuid
         if uuid == BridgeUUID.status {
             let st = data[0]
-            Task { @MainActor in
+            Task { @MainActor [self] in
                 guard isCurrentPeripheral(peripheral) else { return }
                 let label = BridgeUUID.statusLabel(st)
                 let changed = remoteStatus != label
@@ -618,25 +618,27 @@ extension BLEBridgeHost: CBPeripheralDelegate {
         }
         lastEventReceivedAt = CFAbsoluteTimeGetCurrent()
         pkt.receivedAtNs = PerformanceMetrics.shared.received(pkt)
+        let packet = pkt
+        let peripheralID = peripheral.identifier
 
         /* Motion: inject on BLE queue only — no MainActor hop (smoother). */
         if pkt.type == .motion {
-            inputSink.deliver(pkt)
+            inputSink.deliver(packet)
             return
         }
 
         if pkt.type == .button || pkt.type == .voice {
-            inputSink.deliver(pkt)
+            inputSink.deliver(packet)
         }
 
-        Task { @MainActor in
-            guard isCurrentPeripheral(peripheral) else { return }
-            if pkt.type != .motion { eventCount += 1 }
-            onPacket?(pkt)
-            if pkt.type == .button {
-                log(.rx, pkt.buttonDown ? "BTN 0x\(String(format: "%04X", pkt.buttonCode))" : "BTN up")
-            } else if pkt.type == .battery {
-                let level = min(pkt.battery, 100)
+        Task { @MainActor [weak self, packet, peripheralID] in
+            guard let self, self.active?.identifier == peripheralID else { return }
+            if packet.type != .motion { eventCount += 1 }
+            onPacket?(packet)
+            if packet.type == .button {
+                log(.rx, packet.buttonDown ? "BTN 0x\(String(format: "%04X", packet.buttonCode))" : "BTN up")
+            } else if packet.type == .battery {
+                let level = min(packet.battery, 100)
                 let changed = batteryLevel != level
                 batteryLevel = level
                 if changed { log(.info, "Remote battery: \(level)%") }
@@ -650,7 +652,7 @@ extension BLEBridgeHost: CBPeripheralDelegate {
         error: Error?
     ) {
         guard characteristic.uuid == BridgeUUID.command else { return }
-        Task { @MainActor in
+        Task { @MainActor [self] in
             guard isCurrentPeripheral(peripheral) else { return }
             if let error {
                 let ns = error as NSError

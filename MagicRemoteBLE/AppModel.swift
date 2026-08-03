@@ -175,7 +175,7 @@ final class AppModel: ObservableObject {
             self?.objectWillChange.send()
             /* objectWillChange fires in willSet, so the mapper still holds the old
                values here — read them on the next hop or Mouse mode never persists. */
-            DispatchQueue.main.async {
+            DispatchQueue.main.async { [weak self] in
                 MainActor.assumeIsolated {
                     self?.syncPointerOverlay()
                     self?.persistMapperState()
@@ -201,7 +201,7 @@ final class AppModel: ObservableObject {
         mapper.onRemotePointerActivity = { [weak self] in
             /* Mark sync first — avoid race where CGEvent → monitor hides overlay. */
             self?.pointerOverlay.markRemoteDriving()
-            DispatchQueue.main.async { self?.pointerOverlay.noteRemoteActivity() }
+            DispatchQueue.main.async { [weak self] in self?.pointerOverlay.noteRemoteActivity() }
         }
         host.onPacket = { [weak self] packet in
             self?.onPacket(packet)
@@ -214,7 +214,7 @@ final class AppModel: ObservableObject {
             mapperRef.handle(packet)
         }
         mapper.onLog = { [weak host] level, msg in
-            Task { @MainActor in
+            Task { @MainActor [weak host] in
                 host?.log(level, msg)
             }
         }
@@ -243,7 +243,7 @@ final class AppModel: ObservableObject {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            Task { @MainActor in
+            Task { @MainActor [weak self] in
                 self?.mapper.setAppActive(true)
                 self?.mapper.refreshTrust()
                 self?.mapper.reassertInputPipeline()
@@ -256,7 +256,7 @@ final class AppModel: ObservableObject {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            Task { @MainActor in
+            Task { @MainActor [weak self] in
                 self?.mapper.setAppActive(false)
             }
         }
@@ -265,7 +265,7 @@ final class AppModel: ObservableObject {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            Task { @MainActor in
+            Task { @MainActor [weak self] in
                 self?.pointerOverlay.recoverAfterDisplayChange()
             }
         }
@@ -322,7 +322,7 @@ final class AppModel: ObservableObject {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            Task { @MainActor in
+            Task { @MainActor [weak self] in
                 self?.mapper.refreshTrust()
                 self?.mapper.reassertInputPipeline()
                 self?.syncPointerOverlay()
@@ -462,7 +462,9 @@ final class AppModel: ObservableObject {
         }
         host.log(.info, "Metrics recording enabled → \(url.path)")
         metricsTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
-            self?.recordMetrics()
+            Task { @MainActor [weak self] in
+                self?.recordMetrics()
+            }
         }
         if let metricsTimer {
             RunLoop.main.add(metricsTimer, forMode: .common)

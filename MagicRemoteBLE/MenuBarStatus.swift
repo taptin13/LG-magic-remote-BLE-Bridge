@@ -78,7 +78,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func windowWillClose(_ note: Notification) {
         guard let window = note.object as? NSWindow else { return }
-        Task { @MainActor in
+        Task { @MainActor [window] in
             guard DockVisibility.isMainUIWindow(window) else { return }
             let otherMainOpen = NSApp.windows.contains {
                 $0 !== window

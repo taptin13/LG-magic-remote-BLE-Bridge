@@ -411,7 +411,7 @@ final class PointerOverlayController {
         guard screenObservers.isEmpty else { return }
         let center = NotificationCenter.default
         let handler: (Notification) -> Void = { [weak self] _ in
-            DispatchQueue.main.async { self?.recoverAfterDisplayChange() }
+            DispatchQueue.main.async { [weak self] in self?.recoverAfterDisplayChange() }
         }
         screenObservers.append(center.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification,
