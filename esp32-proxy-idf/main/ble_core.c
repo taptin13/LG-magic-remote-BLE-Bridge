@@ -38,6 +38,7 @@ typedef struct {
 typedef struct {
   ble_disc_ctx_t ctx;
   uint16_t val_h;
+  ble_disc_evt_kind_t kind;
   bool used;
 } read_arg_t;
 
@@ -108,12 +109,14 @@ bool ble_core_is_owner(void) {
   return s_owner && xTaskGetCurrentTaskHandle() == s_owner;
 }
 
-static read_arg_t *alloc_read_arg(const ble_disc_ctx_t *ctx, uint16_t val_h) {
+static read_arg_t *alloc_read_arg(const ble_disc_ctx_t *ctx, uint16_t val_h,
+                                  ble_disc_evt_kind_t kind) {
   for (int i = 0; i < 8; i++) {
     if (!s_read_pool[i].used) {
       s_read_pool[i].used = true;
       s_read_pool[i].ctx = *ctx;
       s_read_pool[i].val_h = val_h;
+      s_read_pool[i].kind = kind;
       return &s_read_pool[i];
     }
   }
@@ -175,7 +178,12 @@ static int cb_chr(uint16_t conn, const struct ble_gatt_error *error, const struc
                   void *arg) {
   ble_disc_ctx_t *ctx = (ble_disc_ctx_t *)arg;
   ble_disc_evt_t e = {0};
-  e.kind = (s_chr_kind_pending == 2) ? BLE_DISC_EVT_CHR_HID : BLE_DISC_EVT_CHR_D1;
+  if (s_chr_kind_pending == 2)
+    e.kind = BLE_DISC_EVT_CHR_HID;
+  else if (s_chr_kind_pending == 3)
+    e.kind = BLE_DISC_EVT_CHR_BATTERY;
+  else
+    e.kind = BLE_DISC_EVT_CHR_D1;
   if (ctx) e.ctx = *ctx;
   e.conn = conn;
   e.status = error ? error->status : BLE_HS_EUNKNOWN;
@@ -209,7 +217,7 @@ static int cb_read(uint16_t conn, const struct ble_gatt_error *error, struct ble
                    void *arg) {
   read_arg_t *ra = (read_arg_t *)arg;
   ble_disc_evt_t e = {0};
-  e.kind = BLE_DISC_EVT_READ2908;
+  e.kind = ra ? ra->kind : BLE_DISC_EVT_READ2908;
   if (ra) {
     e.ctx = ra->ctx;
     e.tag_val_h = ra->val_h;
@@ -610,9 +618,9 @@ int ble_core_do_gattc_disc_dscs(uint16_t conn, uint16_t start, uint16_t end,
 }
 
 int ble_core_do_gattc_read(uint16_t conn, uint16_t handle, uint16_t tag_val_h,
-                           const ble_disc_ctx_t *ctx) {
+                           const ble_disc_ctx_t *ctx, ble_disc_evt_kind_t kind) {
   if (!ctx) return BLE_HS_EINVAL;
-  read_arg_t *ra = alloc_read_arg(ctx, tag_val_h);
+  read_arg_t *ra = alloc_read_arg(ctx, tag_val_h, kind);
   if (!ra) return BLE_HS_ENOMEM;
   int rc = ble_gattc_read(conn, handle, cb_read, ra);
   if (rc != 0) free_read_arg(ra);
@@ -688,7 +696,8 @@ static void exec_cmd(const ble_core_msg_t *m) {
         ESP_LOGW(TAG, "disc dscs fail");
       break;
     case BLE_CMD_GATTC_READ:
-      if (ble_core_do_gattc_read(m->conn, m->attr_h, (uint16_t)m->cb_tag, &m->disc_ctx) != 0)
+      if (ble_core_do_gattc_read(m->conn, m->attr_h, (uint16_t)m->cb_tag, &m->disc_ctx,
+                                 (ble_disc_evt_kind_t)m->read_kind) != 0)
         ESP_LOGW(TAG, "gattc read fail");
       break;
     case BLE_CMD_GATTC_WRITE:
@@ -840,6 +849,20 @@ void ble_core_cmd_gattc_read(uint16_t conn, uint16_t handle, uint16_t tag_val_h,
   m.conn = conn;
   m.attr_h = handle;
   m.cb_tag = tag_val_h;
+  m.read_kind = BLE_DISC_EVT_READ2908;
+  m.disc_ctx = *ctx;
+  ble_core_post(&m);
+}
+
+void ble_core_cmd_gattc_read_battery(uint16_t conn, uint16_t handle,
+                                     const ble_disc_ctx_t *ctx) {
+  if (!ctx) return;
+  ble_core_msg_t m = {0};
+  m.cmd = BLE_CMD_GATTC_READ;
+  m.conn = conn;
+  m.attr_h = handle;
+  m.cb_tag = handle;
+  m.read_kind = BLE_DISC_EVT_READ_BATTERY;
   m.disc_ctx = *ctx;
   ble_core_post(&m);
 }

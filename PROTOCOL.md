@@ -39,6 +39,10 @@ Remote target: **`LGE MR25GA`**
 
 `uint8` at offset 2.
 
+The firmware reads the remote's standard Battery Service (`0x180F` / Battery
+Level `0x2A19`) after discovery and periodically refreshes it every five
+minutes while connected. The Mac UI displays the latest level received.
+
 ## Status byte
 
 | Value | Meaning |

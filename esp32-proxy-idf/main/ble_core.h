@@ -43,8 +43,10 @@ typedef enum {
   BLE_DISC_EVT_SVC,
   BLE_DISC_EVT_CHR_D1,
   BLE_DISC_EVT_CHR_HID,
+  BLE_DISC_EVT_CHR_BATTERY,
   BLE_DISC_EVT_DSC,
   BLE_DISC_EVT_READ2908,
+  BLE_DISC_EVT_READ_BATTERY,
   BLE_DISC_EVT_CCCD_WRITE,
 } ble_disc_evt_kind_t;
 
@@ -83,7 +85,8 @@ typedef struct {
   uint16_t attr_h;
   uint8_t write_buf[4];
   uint8_t write_len;
-  uint8_t disc_chr_kind; /* 1=d1 2=hid */
+  uint8_t disc_chr_kind; /* 1=d1 2=hid 3=battery */
+  uint8_t read_kind; /* BLE_DISC_EVT_READ* */
   uint8_t sm_action;
   uint32_t sm_passkey;
   uintptr_t cb_tag;
@@ -120,7 +123,7 @@ int ble_core_do_gattc_disc_chrs(uint16_t conn, uint16_t start, uint16_t end, uin
 int ble_core_do_gattc_disc_dscs(uint16_t conn, uint16_t start, uint16_t end,
                                 const ble_disc_ctx_t *ctx);
 int ble_core_do_gattc_read(uint16_t conn, uint16_t handle, uint16_t tag_val_h,
-                           const ble_disc_ctx_t *ctx);
+                           const ble_disc_ctx_t *ctx, ble_disc_evt_kind_t kind);
 int ble_core_do_gattc_write(uint16_t conn, uint16_t handle, const uint8_t *data, uint8_t len,
                             const ble_disc_ctx_t *ctx);
 int ble_core_do_gattc_write_no_rsp(uint16_t conn, uint16_t handle, const uint8_t *data,
@@ -144,6 +147,7 @@ void ble_core_cmd_gattc_disc_dscs(uint16_t conn, uint16_t start, uint16_t end,
                                   const ble_disc_ctx_t *ctx);
 void ble_core_cmd_gattc_read(uint16_t conn, uint16_t handle, uint16_t tag_val_h,
                              const ble_disc_ctx_t *ctx);
+void ble_core_cmd_gattc_read_battery(uint16_t conn, uint16_t handle, const ble_disc_ctx_t *ctx);
 void ble_core_cmd_gattc_write(uint16_t conn, uint16_t handle, const uint8_t *data, uint8_t len,
                               const ble_disc_ctx_t *ctx);
 void ble_core_cmd_gattc_write_no_rsp(uint16_t conn, uint16_t handle, const uint8_t *data,

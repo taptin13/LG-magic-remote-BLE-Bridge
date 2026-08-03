@@ -16,6 +16,7 @@ final class BLEBridgeHost: NSObject, ObservableObject {
     @Published private(set) var devices: [DiscoveredBridge] = []
     @Published var selectedID: UUID?
     @Published private(set) var remoteStatus = "—"
+    @Published private(set) var batteryLevel: UInt8?
     @Published private(set) var eventCount = 0
     @Published private(set) var logs: [LogEntry] = []
     /// When on: BT On → Scan → Connect automatically (and reconnect after disconnect).
@@ -265,6 +266,7 @@ final class BLEBridgeHost: NSObject, ObservableObject {
         awaitingEventNotify = false
         connectingID = nil
         remoteStatus = "—"
+        batteryLevel = nil
         sessionPeripheralID = nil
         sessionGeneration = connectionGeneration
         phase = next
@@ -625,6 +627,11 @@ extension BLEBridgeHost: CBPeripheralDelegate {
             onPacket?(pkt)
             if pkt.type == .button {
                 log(.rx, pkt.buttonDown ? "BTN 0x\(String(format: "%04X", pkt.buttonCode))" : "BTN up")
+            } else if pkt.type == .battery {
+                let level = min(pkt.battery, 100)
+                let changed = batteryLevel != level
+                batteryLevel = level
+                if changed { log(.info, "Remote battery: \(level)%") }
             }
         }
     }

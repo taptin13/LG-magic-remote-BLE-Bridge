@@ -108,6 +108,16 @@ struct ConnectionView: View {
                         Text(model.host.remoteStatus)
                             .foregroundStyle(.secondary)
                     }
+                    LabeledContent("Remote battery") {
+                        if let level = model.host.batteryLevel {
+                            Label("\(level)%", systemImage: batterySymbol(for: level))
+                                .foregroundStyle(level <= 20 ? .orange : .secondary)
+                                .monospacedDigit()
+                        } else {
+                            Text("—")
+                                .foregroundStyle(.tertiary)
+                        }
+                    }
                     LabeledContent("Mouse mode") {
                         StatusBadge(
                             text: model.mapper.mouseMode ? "ON" : "OFF",
@@ -388,6 +398,16 @@ struct ConnectionView: View {
             if model.host.bluetoothAuthLabel.contains("Restricted") { return "Restricted" }
             if model.host.bluetoothAuthLabel.contains("NotDetermined") { return "Not Determined" }
             return "Unavailable"
+        }
+    }
+
+    private func batterySymbol(for level: UInt8) -> String {
+        switch level {
+        case 0...10: return "battery.0percent"
+        case 11...25: return "battery.25percent"
+        case 26...50: return "battery.50percent"
+        case 51...75: return "battery.75percent"
+        default: return "battery.100percent"
         }
     }
 

@@ -33,7 +33,9 @@ static uint8_t s_rep_ids[16];
 static int s_rep_count;
 
 static uint16_t s_d1_start, s_d1_end, s_hid_start, s_hid_end;
+static uint16_t s_battery_start, s_battery_end, s_battery_handle;
 static uint16_t s_proto_handle;
+static int64_t s_battery_next_read_ms;
 
 /* Chars needing CCCD + optional 2908 */
 typedef struct {
@@ -74,6 +76,8 @@ static bool s_mac_rebind_pending;
 
 static const ble_uuid128_t uuid_d1ff = BLE_UUID128_INIT(REMOTE_D1FF_UUID128);
 static const ble_uuid16_t uuid_hid = BLE_UUID16_INIT(0x1812);
+static const ble_uuid16_t uuid_battery = BLE_UUID16_INIT(0x180F);
+static const ble_uuid16_t uuid_battery_level = BLE_UUID16_INIT(0x2A19);
 static const ble_uuid16_t uuid_a001 = BLE_UUID16_INIT(0xA001);
 static const ble_uuid16_t uuid_2a4d = BLE_UUID16_INIT(0x2A4D);
 static const ble_uuid16_t uuid_2a4e = BLE_UUID16_INIT(0x2A4E);
@@ -85,6 +89,7 @@ static void start_scan_burst(void);
 static void try_connect(uint32_t timeout_ms);
 static void try_cached_reconnect(void);
 static void begin_discover(void);
+static void begin_battery_or_dsc(void);
 static void finish_discover_ok(void);
 static void discover_fail(void);
 static int write_next_cccd(void);
@@ -275,14 +280,18 @@ static void rebind_remote_after_mac_reconnect(void) {
   mac_gatt_set_status(ST_REMOTE_DROP);
 }
 
-static bool disc_ctx_ok(const ble_disc_ctx_t *ctx, uint16_t conn_handle) {
+static bool disc_ctx_ok(const ble_disc_ctx_t *ctx, uint16_t conn_handle,
+                        ble_disc_evt_kind_t kind) {
   if (!ctx) return false;
   if (ctx->conn != conn_handle || ctx->conn != s_conn) return false;
   if (ctx->conn_gen != s_conn_gen || ctx->disc_gen != s_disc_gen) {
     bridge_metrics()->session_mismatch++;
     return false;
   }
-  if (bridge_state_remote() != REM_DISCOVERING || s_disc_fail) return false;
+  bool battery_read_ready = kind == BLE_DISC_EVT_READ_BATTERY &&
+                            bridge_state_remote() == REM_READY;
+  if (bridge_state_remote() != REM_DISCOVERING && !battery_read_ready) return false;
+  if (s_disc_fail) return false;
   return true;
 }
 
@@ -388,7 +397,20 @@ static void handle_disc_svc(const ble_disc_evt_t *e) {
     s_hid_start = e->start_h;
     s_hid_end = e->end_h;
     ESP_LOGI(TAG, "HID %u-%u", s_hid_start, s_hid_end);
+  } else if (evt_uuid_eq(e, (ble_uuid_t *)&uuid_battery.u)) {
+    s_battery_start = e->start_h;
+    s_battery_end = e->end_h;
+    ESP_LOGI(TAG, "Battery %u-%u", s_battery_start, s_battery_end);
   }
+}
+
+static void begin_battery_or_dsc(void) {
+  if (s_battery_start) {
+    ble_core_cmd_gattc_disc_chrs(s_conn, s_battery_start, s_battery_end, 3, &s_disc_ctx);
+    return;
+  }
+  s_job_i = 0;
+  run_next_job_dsc();
 }
 
 static void handle_disc_chr_d1(const ble_disc_evt_t *e) {
@@ -396,8 +418,7 @@ static void handle_disc_chr_d1(const ble_disc_evt_t *e) {
     if (s_hid_start)
       ble_core_cmd_gattc_disc_chrs(s_conn, s_hid_start, s_hid_end, 2, &s_disc_ctx);
     else {
-      s_job_i = 0;
-      run_next_job_dsc();
+      begin_battery_or_dsc();
     }
     return;
   }
@@ -416,8 +437,7 @@ static void handle_disc_chr_hid(const ble_disc_evt_t *e) {
       if (s_jobs[i].end_handle <= s_jobs[i].val_handle)
         s_jobs[i].end_handle = s_jobs[i].val_handle + 10;
     }
-    s_job_i = 0;
-    run_next_job_dsc();
+    begin_battery_or_dsc();
     return;
   }
   if (e->status != 0) {
@@ -430,6 +450,28 @@ static void handle_disc_chr_hid(const ble_disc_evt_t *e) {
     s_proto_handle = e->val_h;
   } else if (evt_uuid_eq(e, (ble_uuid_t *)&uuid_2a4d.u)) {
     add_job(e->val_h, 0, true);
+  }
+}
+
+static void handle_disc_chr_battery(const ble_disc_evt_t *e) {
+  if (e->status == BLE_HS_EDONE) {
+    s_job_i = 0;
+    run_next_job_dsc();
+    return;
+  }
+  if (e->status != 0) {
+    /* Battery is optional; keep the remote usable if the service is present
+     * but its characteristic discovery fails. */
+    ESP_LOGW(TAG, "Battery characteristic discovery failed (%d)", e->status);
+    s_battery_start = s_battery_end = 0;
+    s_battery_handle = 0;
+    s_job_i = 0;
+    run_next_job_dsc();
+    return;
+  }
+  if (evt_uuid_eq(e, (ble_uuid_t *)&uuid_battery_level.u)) {
+    s_battery_handle = e->val_h;
+    ESP_LOGI(TAG, "Battery Level handle=%u", s_battery_handle);
   }
 }
 
@@ -479,13 +521,25 @@ static void handle_disc_read2908(const ble_disc_evt_t *e) {
   maybe_start_cccd_writes();
 }
 
+static void handle_disc_read_battery(const ble_disc_evt_t *e) {
+  if (e->status != 0 || e->data_len < 1 || e->data[0] > 100) {
+    ESP_LOGW(TAG, "Battery read failed status=%d len=%u", e->status, e->data_len);
+    return;
+  }
+  bus_event_t ev = {0};
+  ev.type = BUS_BATTERY;
+  ev.u.battery = e->data[0];
+  (void)event_bus_publish(&ev);
+  ESP_LOGI(TAG, "Battery level=%u%%", (unsigned)e->data[0]);
+}
+
 static void handle_disc_cccd_write(const ble_disc_evt_t *e) {
   if (e->status != 0) ESP_LOGW(TAG, "CCCD err %d", e->status);
   write_next_cccd();
 }
 
 static void on_disc_evt(const ble_disc_evt_t *e) {
-  if (!e || !disc_ctx_ok(&e->ctx, e->conn)) return;
+  if (!e || !disc_ctx_ok(&e->ctx, e->conn, e->kind)) return;
   switch (e->kind) {
     case BLE_DISC_EVT_SVC:
       handle_disc_svc(e);
@@ -496,11 +550,17 @@ static void on_disc_evt(const ble_disc_evt_t *e) {
     case BLE_DISC_EVT_CHR_HID:
       handle_disc_chr_hid(e);
       break;
+    case BLE_DISC_EVT_CHR_BATTERY:
+      handle_disc_chr_battery(e);
+      break;
     case BLE_DISC_EVT_DSC:
       handle_disc_dsc(e);
       break;
     case BLE_DISC_EVT_READ2908:
       handle_disc_read2908(e);
+      break;
+    case BLE_DISC_EVT_READ_BATTERY:
+      handle_disc_read_battery(e);
       break;
     case BLE_DISC_EVT_CCCD_WRITE:
       handle_disc_cccd_write(e);
@@ -539,6 +599,9 @@ static void finish_discover_ok(void) {
     ble_core_cmd_gap_update(s_conn, &up);
   set_state(REM_READY);
   mac_gatt_set_status(ST_READY);
+  s_battery_next_read_ms = now_ms() + 300000;
+  if (s_battery_handle)
+    ble_core_cmd_gattc_read_battery(s_conn, s_battery_handle, &s_disc_ctx);
   ESP_LOGI(TAG, "READY reports=%d cccd=%d", s_rep_count, s_cccd_n);
 }
 
@@ -548,6 +611,8 @@ static void begin_discover(void) {
   s_cccd_n = s_cccd_i = 0;
   s_cccd_map_n = 0;
   s_pending_2908 = 0;
+  s_battery_start = s_battery_end = s_battery_handle = 0;
+  s_battery_next_read_ms = 0;
   s_dsc_jobs_done = false;
   s_rep_count = 0;
   s_proto_handle = 0;
@@ -904,6 +969,10 @@ void remote_manager_tick(void) {
   }
 
   if (bridge_state_remote() == REM_READY) {
+    if (s_battery_handle && s_battery_next_read_ms && now_ms() >= s_battery_next_read_ms) {
+      s_battery_next_read_ms = now_ms() + 300000;
+      ble_core_cmd_gattc_read_battery(s_conn, s_battery_handle, &s_disc_ctx);
+    }
     if (s_remote_drop || s_conn == BLE_HS_CONN_HANDLE_NONE) {
       s_remote_drop = false;
       ESP_LOGI(TAG, "link lost");
