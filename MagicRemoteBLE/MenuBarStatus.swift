@@ -105,6 +105,12 @@ struct MenuBarStatusView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(2)
+            if let battery = model.host.batteryLevel {
+                Label("Remote battery: \(battery)%", systemImage: batterySymbol(for: battery))
+                    .font(.caption)
+                    .foregroundStyle(battery <= 20 ? .orange : .secondary)
+                    .monospacedDigit()
+            }
         }
         .padding(.horizontal, 4)
         .padding(.vertical, 2)
@@ -169,6 +175,16 @@ struct MenuBarStatusView: View {
                : "Map (needs Accessibility)")
             : "Map OFF"
         return "Remote: \(remote) · \(map)"
+    }
+
+    private func batterySymbol(for level: UInt8) -> String {
+        switch level {
+        case 0...10: return "battery.0percent"
+        case 11...25: return "battery.25percent"
+        case 26...50: return "battery.50percent"
+        case 51...75: return "battery.75percent"
+        default: return "battery.100percent"
+        }
     }
 
     private func showMainWindow() {
