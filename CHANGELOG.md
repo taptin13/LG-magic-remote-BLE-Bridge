@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.1.3 — 2026-08-03
+
+### Mac (`MagicRemoteBLE`)
+- Rebind the remote BLE session automatically after macOS wake and reconnect.
+- Read the standard Battery Service (`0x180F` / `0x2A19`) and show the remote battery in the app and menu dropdown.
+- Keep the menu bar icon compact without placing the battery percentage beside it.
+- Stop reconnect retry loops on macOS pairing-information mismatch and show recovery guidance.
+- Fix Swift concurrency capture issues for Xcode and CI builds.
+- Version SoT: Info.plist uses `$(MARKETING_VERSION)` / `$(CURRENT_PROJECT_VERSION)` (0.1.3 / 3)
+
 ## v0.1.2 — 2026-08-02
 
 ### Mac (`MagicRemoteBLE`)
