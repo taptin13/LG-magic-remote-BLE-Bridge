@@ -22,6 +22,11 @@ static bool s_encrypted;
 static bool s_ready;
 static uint8_t s_seq;
 static uint8_t s_status = ST_BOOT;
+static uint8_t s_status_payload[5] = {
+    ST_BOOT, PROXY_STATUS_MAGIC, PROXY_PROTOCOL_VERSION,
+    (uint8_t)(PROXY_CAPABILITY_FLAGS & 0xff),
+    (uint8_t)((PROXY_CAPABILITY_FLAGS >> 8) & 0xff),
+};
 static mac_cmd_cb_t s_cmd_cb;
 static uint8_t s_own_addr_type;
 static uint32_t s_link_gen = 1;
@@ -79,6 +84,14 @@ static bool link_encrypted(uint16_t conn_handle) {
   return d.sec_state.encrypted != 0;
 }
 
+static void update_status_payload(void) {
+  s_status_payload[0] = s_status;
+  s_status_payload[1] = PROXY_STATUS_MAGIC;
+  s_status_payload[2] = PROXY_PROTOCOL_VERSION;
+  s_status_payload[3] = (uint8_t)(PROXY_CAPABILITY_FLAGS & 0xff);
+  s_status_payload[4] = (uint8_t)((PROXY_CAPABILITY_FLAGS >> 8) & 0xff);
+}
+
 static void refresh_ready(void) {
 #if PROXY_REQUIRE_MAC_ENC
   bool next = s_subscribed && s_encrypted;
@@ -111,7 +124,8 @@ static int gatt_svr_chr_access(uint16_t conn_handle, uint16_t attr_handle,
   (void)arg;
   if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
     if (attr_handle == s_sts_val_handle) {
-      int rc = os_mbuf_append(ctxt->om, &s_status, 1);
+      update_status_payload();
+      int rc = os_mbuf_append(ctxt->om, s_status_payload, sizeof(s_status_payload));
       return rc == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
     }
     if (attr_handle == s_evt_val_handle) {
@@ -293,8 +307,9 @@ void mac_gatt_set_status(uint8_t st) {
 
 void mac_gatt_set_status_raw(uint8_t st) {
   s_status = st;
+  update_status_payload();
   if (s_conn == BLE_HS_CONN_HANDLE_NONE) return;
-  struct os_mbuf *om = ble_hs_mbuf_from_flat(&s_status, 1);
+  struct os_mbuf *om = ble_hs_mbuf_from_flat(s_status_payload, sizeof(s_status_payload));
   if (om) ble_gatts_notify_custom(s_conn, s_sts_val_handle, om);
 }
 

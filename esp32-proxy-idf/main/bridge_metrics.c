@@ -37,14 +37,15 @@ void bridge_metrics_log(void) {
 
   ESP_LOGI(TAG,
            "tx_drop m/b/o=%lu/%lu/%lu ovf=%lu nfy=%lu sess_mis=%lu "
-           "recon=%lu syn_rel=%lu mac_disc=%lu reason=%lu",
+           "recon=%lu syn_rel=%lu mac_disc=%lu reason=%lu rx_drop=%lu",
            (unsigned long)s_m.tx_drop_motion, (unsigned long)s_m.tx_drop_button,
            (unsigned long)s_m.tx_drop_other, (unsigned long)s_m.tx_overflow,
            (unsigned long)s_m.tx_notify_fail, (unsigned long)s_m.session_mismatch,
            (unsigned long)s_m.reconnect_count,
            (unsigned long)s_m.button_synthetic_release,
            (unsigned long)s_m.mac_disconnect_count,
-           (unsigned long)s_m.mac_disconnect_reason);
+           (unsigned long)s_m.mac_disconnect_reason,
+           (unsigned long)s_m.remote_rx_drop);
   ESP_LOGI(TAG,
            "timeouts scan/conn/sec/disc/cccd=%lu/%lu/%lu/%lu/%lu "
            "motion coal/sat/req=%lu/%lu/%lu nfy_ok=%lu (%lu/s)",

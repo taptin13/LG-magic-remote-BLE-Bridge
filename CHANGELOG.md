@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.1.5 — 2026-08-04
+
+### Mac (`MagicRemoteBLE`)
+- Parse a backward-compatible firmware protocol handshake with version and capabilities.
+- Invalidate stale delayed reconnect callbacks after sleep, radio reset, or manual reconnect.
+
+### Firmware (`esp32-proxy-idf`)
+- Move remote notification decode out of the NimBLE GAP callback into a bounded RX queue.
+- Reject stale RX packets using the remote session generation.
+- Add RX overflow metrics and remove investigation-only voice/vendor logging from the production path.
+
+### Validation
+- Hardware test pass: mouse, buttons, scroll, battery, sleep/wake, reconnect, and bond recovery.
+- XCTest, ESP32 host tests, and PlatformIO firmware build pass.
+
 ## v0.1.4 — 2026-08-04
 
 ### Mac (`MagicRemoteBLE`)

@@ -54,6 +54,21 @@ minutes while connected. The Mac UI displays the latest level received.
 | 4 | ready |
 | 5 | remote dropped |
 
+The Status characteristic is backward-compatible and now returns/notifies:
+
+```
+[0] status (legacy ST_* value)
+[1] 0xA5 handshake marker
+[2] protocol version
+[3..4] capability flags, little-endian
+```
+
+Older firmware may send only byte 0; the app continues operating in that
+case. Older apps read byte 0 and ignore the additional handshake bytes.
+
+Current capability flags: `0x0001` airmouse, `0x0002` scroll, `0x0004`
+battery, `0x0008` session-generation recovery.
+
 ## Command (Mac → ESP32)
 
 | Byte0 | Payload | Meaning |

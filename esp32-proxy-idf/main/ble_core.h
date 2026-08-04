@@ -96,6 +96,7 @@ typedef void (*ble_disc_evt_fn)(const ble_disc_evt_t *evt);
 
 void ble_core_init(void);
 void ble_core_start(void);
+void ble_core_wake(void);
 void ble_core_set_disc_handler(ble_disc_evt_fn fn);
 
 bool ble_core_is_owner(void);

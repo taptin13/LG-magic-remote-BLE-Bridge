@@ -262,6 +262,10 @@ void ble_core_init(void) {
 
 void ble_core_set_disc_handler(ble_disc_evt_fn fn) { s_disc_handler = fn; }
 
+void ble_core_wake(void) {
+  if (s_wake) xSemaphoreGive(s_wake);
+}
+
 uint32_t ble_core_tx_gen(void) { return s_tx_gen; }
 
 static void pressed_add(uint16_t code) {

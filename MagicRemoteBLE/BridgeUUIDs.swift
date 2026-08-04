@@ -23,6 +23,21 @@ enum BridgeUUID {
     }
 }
 
+struct BridgeStatusHandshake: Equatable {
+    static let magic: UInt8 = 0xA5
+
+    let protocolVersion: UInt8
+    let capabilities: UInt16
+
+    static func parse(_ data: Data) -> BridgeStatusHandshake? {
+        guard data.count >= 5, data[1] == magic else { return nil }
+        return BridgeStatusHandshake(
+            protocolVersion: data[2],
+            capabilities: UInt16(data[3]) | (UInt16(data[4]) << 8)
+        )
+    }
+}
+
 enum BridgePktType: UInt8 {
     case motion = 1, button = 2, battery = 3, status = 4, voice = 5
 }

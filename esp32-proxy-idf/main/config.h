@@ -63,3 +63,13 @@
   0x45, 0x47, 0x44, 0x49, 0x52, 0x42, 0x41, 0x47, 0x35, 0x32, 0x52, 0x4d, 0x03, 0x00, 0x52, 0x6d
 #define PROXY_CMD_UUID128 \
   0x45, 0x47, 0x44, 0x49, 0x52, 0x42, 0x41, 0x47, 0x35, 0x32, 0x52, 0x4d, 0x12, 0x00, 0x52, 0x6d
+
+/* Status characteristic handshake. Byte 0 remains the legacy ST_* value. */
+#define PROXY_STATUS_MAGIC 0xA5
+#define PROXY_PROTOCOL_VERSION 1
+#define PROXY_CAP_AIRMOUSE (1u << 0)
+#define PROXY_CAP_SCROLL (1u << 1)
+#define PROXY_CAP_BATTERY (1u << 2)
+#define PROXY_CAP_SESSION_GENERATION (1u << 3)
+#define PROXY_CAPABILITY_FLAGS \
+  (PROXY_CAP_AIRMOUSE | PROXY_CAP_SCROLL | PROXY_CAP_BATTERY | PROXY_CAP_SESSION_GENERATION)

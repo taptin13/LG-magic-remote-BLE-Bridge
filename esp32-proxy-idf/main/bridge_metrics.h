@@ -26,6 +26,7 @@ typedef struct {
   uint32_t mac_disconnect_count;
   uint32_t mac_disconnect_reason;
   uint32_t remote_fd_count;
+  uint32_t remote_rx_drop;
   uint32_t decoder_total_us;
   uint32_t decoder_max_us;
 } bridge_metrics_t;

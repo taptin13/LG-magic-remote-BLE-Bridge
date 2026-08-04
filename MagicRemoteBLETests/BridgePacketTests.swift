@@ -32,6 +32,16 @@ final class BridgePacketTests: XCTestCase {
         XCTAssertEqual(BridgePacket.parse(Data([4, 1, 2]))?.status, 2)
     }
 
+    func testParseStatusHandshake() {
+        let handshake = BridgeStatusHandshake.parse(Data([4, 0xA5, 1, 0x0D, 0x00]))
+        XCTAssertEqual(handshake?.protocolVersion, 1)
+        XCTAssertEqual(handshake?.capabilities, 0x000D)
+    }
+
+    func testLegacyStatusHasNoHandshake() {
+        XCTAssertNil(BridgeStatusHandshake.parse(Data([4])))
+    }
+
     func testRejectMalformed() {
         XCTAssertNil(BridgePacket.parse(Data([])))
         XCTAssertNil(BridgePacket.parse(Data([1, 0]))) // motion too short

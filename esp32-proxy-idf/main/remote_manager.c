@@ -13,6 +13,8 @@
 #include "host/ble_gatt.h"
 #include "host/ble_store.h"
 #include "host/ble_sm.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 #include <string.h>
 
 static const char *TAG = "RM";
@@ -60,6 +62,16 @@ static int64_t s_reconnect_delay_ms = 400;
  * consecutive long direct connects while the remote is asleep. */
 static bool s_recovery_next_scan;
 static int s_enc_fail_streak;
+typedef struct {
+  uint16_t attr_handle;
+  uint16_t conn_handle;
+  uint32_t conn_gen;
+  uint16_t len;
+  uint8_t data[64];
+} remote_rx_item_t;
+
+#define REMOTE_RX_QUEUE_LEN 16
+static QueueHandle_t s_rx_q;
 /** Incremented on each connect/disconnect — stale discovery callbacks are ignored. */
 static uint32_t s_conn_gen;
 static uint32_t s_disc_gen;
@@ -225,7 +237,7 @@ static bool name_is_remote(const uint8_t *name, uint8_t name_len) {
   return false;
 }
 
-static void on_notify(uint16_t attr_handle, const uint8_t *data, uint16_t len) {
+static void process_notify(uint16_t attr_handle, const uint8_t *data, uint16_t len) {
   if (!s_dec || !data || len == 0) return;
   uint8_t rid = report_id_for(attr_handle);
   if (rid == 0xFD && len >= 19) {
@@ -753,7 +765,19 @@ static int gap_event(struct ble_gap_event *event, void *arg) {
       uint8_t buf[64];
       if (len > sizeof(buf)) len = sizeof(buf);
       ble_hs_mbuf_to_flat(event->notify_rx.om, buf, len, NULL);
-      on_notify(event->notify_rx.attr_handle, buf, len);
+      if (!s_rx_q) return 0;
+      remote_rx_item_t item = {
+          .attr_handle = event->notify_rx.attr_handle,
+          .conn_handle = event->notify_rx.conn_handle,
+          .conn_gen = s_conn_gen,
+          .len = len,
+      };
+      memcpy(item.data, buf, len);
+      if (xQueueSend(s_rx_q, &item, 0) != pdTRUE) {
+        bridge_metrics()->remote_rx_drop++;
+      } else {
+        ble_core_wake();
+      }
       return 0;
     }
     case BLE_GAP_EVENT_REPEAT_PAIRING: {
@@ -820,6 +844,8 @@ static void try_cached_reconnect(void) {
 
 void remote_manager_init(remote_decoder_t *decoder) {
   s_dec = decoder;
+  s_rx_q = xQueueCreate(REMOTE_RX_QUEUE_LEN, sizeof(remote_rx_item_t));
+  if (!s_rx_q) ESP_LOGE(TAG, "RX queue allocation failed");
   load_cache();
   ble_hs_id_infer_auto(0, &s_own_addr_type);
   ble_core_set_disc_handler(on_disc_evt);
@@ -827,6 +853,13 @@ void remote_manager_init(remote_decoder_t *decoder) {
 }
 
 void remote_manager_tick(void) {
+  remote_rx_item_t item;
+  int rx_budget = 12;
+  while (rx_budget-- > 0 && s_rx_q && xQueueReceive(s_rx_q, &item, 0) == pdTRUE) {
+    if (item.conn_handle == s_conn && item.conn_gen == s_conn_gen)
+      process_notify(item.attr_handle, item.data, item.len);
+  }
+
   flush_nvs_if_dirty();
 
   bool mac_ready = mac_gatt_mac_ready();

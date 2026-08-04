@@ -16,6 +16,8 @@ final class BLEBridgeHost: NSObject, ObservableObject {
     @Published private(set) var devices: [DiscoveredBridge] = []
     @Published var selectedID: UUID?
     @Published private(set) var remoteStatus = "—"
+    @Published private(set) var protocolVersion: UInt8?
+    @Published private(set) var capabilities: UInt16?
     @Published private(set) var batteryLevel: UInt8?
     @Published private(set) var requiresPairingReset = false
     @Published private(set) var eventCount = 0
@@ -47,6 +49,7 @@ final class BLEBridgeHost: NSObject, ObservableObject {
     /// after sleep. A second failure is treated as a real pairing mismatch.
     private var pairingRecoveryAttempted = false
     private var autoConnectScheduled = false
+    private var reconnectScheduleGeneration: UInt64 = 0
     private var connectingID: UUID?
     /// Bumped on every session bind/clear — stale CoreBluetooth callbacks must ignore old gens.
     private(set) var connectionGeneration: UInt64 = 0
@@ -115,6 +118,7 @@ final class BLEBridgeHost: NSObject, ObservableObject {
 
     /// Start (or restart) auto Scan → Connect flow.
     func reconnect() {
+        invalidateScheduledReconnects()
         userStoppedAuto = false
         pairingRecoveryRequired = false
         pairingRecoveryAttempted = false
@@ -131,6 +135,7 @@ final class BLEBridgeHost: NSObject, ObservableObject {
         autoConnect = on
         onPrefsChanged?()
         if on {
+            invalidateScheduledReconnects()
             userStoppedAuto = false
             pairingRecoveryRequired = false
             pairingRecoveryAttempted = false
@@ -164,11 +169,11 @@ final class BLEBridgeHost: NSObject, ObservableObject {
         guard autoConnect, !userStoppedAuto else { return }
         wakeRecoveryGeneration &+= 1
         let generation = wakeRecoveryGeneration
+        invalidateScheduledReconnects()
         reconnectAttempt = 0
         pairingRecoveryAttempted = false
         pairingRecoveryRequired = false
         requiresPairingReset = false
-        autoConnectScheduled = false
         log(.matrix, "Recovering BLE after system wake")
         if let p = active { central.cancelPeripheralConnection(p) }
         stopScan()
@@ -195,7 +200,7 @@ final class BLEBridgeHost: NSObject, ObservableObject {
     private func scheduleRadioRecovery() {
         radioRecoveryGeneration &+= 1
         let generation = radioRecoveryGeneration
-        autoConnectScheduled = false
+        invalidateScheduledReconnects()
         for delay in [1.0, 4.0] as [TimeInterval] {
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
                 guard let self,
@@ -323,6 +328,8 @@ final class BLEBridgeHost: NSObject, ObservableObject {
         awaitingEventNotify = false
         connectingID = nil
         remoteStatus = "—"
+        protocolVersion = nil
+        capabilities = nil
         batteryLevel = nil
         sessionPeripheralID = nil
         sessionGeneration = connectionGeneration
@@ -393,15 +400,23 @@ final class BLEBridgeHost: NSObject, ObservableObject {
         guard autoConnect, !userStoppedAuto, !pairingRecoveryRequired, bluetoothOK else { return }
         guard !autoConnectScheduled else { return }
         autoConnectScheduled = true
+        reconnectScheduleGeneration &+= 1
+        let generation = reconnectScheduleGeneration
         let idx = min(reconnectAttempt, Self.reconnectBackoff.count - 1)
         let delay = Self.reconnectBackoff[idx]
         reconnectAttempt += 1
         log(.info, "Auto-reconnect in \(Int(delay))s (attempt \(reconnectAttempt))")
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self else { return }
+            guard self.reconnectScheduleGeneration == generation else { return }
             self.autoConnectScheduled = false
             self.beginAutoConnect(reason: "after disconnect")
         }
+    }
+
+    private func invalidateScheduledReconnects() {
+        reconnectScheduleGeneration &+= 1
+        autoConnectScheduled = false
     }
 
     private func resetReconnectBackoff() {
@@ -443,7 +458,7 @@ extension BLEBridgeHost: CBCentralManagerDelegate {
             case .poweredOff:
                 bluetoothOK = false
                 radioRecoveryGeneration &+= 1
-                autoConnectScheduled = false
+                invalidateScheduledReconnects()
                 stopScan()
                 if active != nil || connectingID != nil { clearSession(phase: .poweredOff) }
                 phase = .poweredOff
@@ -455,7 +470,7 @@ extension BLEBridgeHost: CBCentralManagerDelegate {
             case .resetting:
                 bluetoothOK = false
                 radioRecoveryGeneration &+= 1
-                autoConnectScheduled = false
+                invalidateScheduledReconnects()
                 stopScan()
                 if active != nil || connectingID != nil { clearSession(phase: .poweredOff) }
                 log(.info, "Bluetooth: Resetting…")
@@ -658,6 +673,7 @@ extension BLEBridgeHost: CBPeripheralDelegate {
             pairingRecoveryRequired = false
             requiresPairingReset = false
             phase = .ready
+            invalidateScheduledReconnects()
             startLinkKeepAlive()
             log(.matrix, "Ready — Event notify OK")
         }
@@ -669,8 +685,11 @@ extension BLEBridgeHost: CBPeripheralDelegate {
         let uuid = characteristic.uuid
         if uuid == BridgeUUID.status {
             let st = data[0]
+            let handshake = BridgeStatusHandshake.parse(data)
             Task { @MainActor [self] in
                 guard isCurrentPeripheral(peripheral) else { return }
+                protocolVersion = handshake?.protocolVersion
+                capabilities = handshake?.capabilities
                 let label = BridgeUUID.statusLabel(st)
                 let changed = remoteStatus != label
                 remoteStatus = label
