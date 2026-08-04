@@ -1,5 +1,24 @@
 # Changelog
 
+## v0.1.4 — 2026-08-04
+
+### Mac (`MagicRemoteBLE`)
+- Recover cleanly when CoreBluetooth resets the radio after system sleep.
+- Wait for the Bluetooth controller to settle before reconnecting.
+- Prefer the cached peripheral UUID before falling back to a new scan.
+- Retry transient pairing-state errors once before asking the user to forget `MR-Proxy`.
+- Keep XCTest isolated from WindowServer cursor APIs on CI runners.
+
+### Firmware (`esp32-proxy-idf`)
+- Reduce idle `BleCoreTask` wakeups from 2 ms to 10 ms.
+- Make the Mac bridge event-driven instead of polling every 20 ms when idle.
+- Preserve motion/button event wakeup behavior and protocol compatibility.
+
+### Validation
+- macOS Universal Debug/Release builds pass.
+- XCTest, ESP32 PlatformIO build, and ESP32 host tests pass.
+- Artifact remains ad-hoc signed; Developer ID signing/notarization is required for broad distribution.
+
 ## v0.1.3 — 2026-08-03
 
 ### Mac (`MagicRemoteBLE`)
