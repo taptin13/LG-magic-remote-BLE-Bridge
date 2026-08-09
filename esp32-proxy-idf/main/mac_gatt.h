@@ -14,6 +14,8 @@ void mac_gatt_start_advertise(void);
 void mac_gatt_stop_advertise(void);
 /** BleCoreTask only — runs ADV. */
 void mac_gatt_adv_start_raw(void);
+/** BleCoreTask only — clears Mac bonds while preserving the cached remote bond. */
+void mac_gatt_reset_mac_bond_raw(void);
 void mac_gatt_set_status(uint8_t st);
 /** BleCoreTask only — notify status char. */
 void mac_gatt_set_status_raw(uint8_t st);

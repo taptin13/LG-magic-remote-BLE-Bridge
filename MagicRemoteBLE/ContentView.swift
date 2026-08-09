@@ -105,7 +105,7 @@ struct ConnectionView: View {
                         StatusBadge(text: phaseLabel, tone: phaseTone)
                     }
                     if model.host.requiresPairingReset {
-                        Text("Pairing is out of sync. Forget MR-Proxy in System Settings → Bluetooth, then press Retry.")
+                        Text("Pairing is out of sync. Release BOOT, then hold the ESP32 BOOT button for 3 seconds to reset Mac pairing.")
                             .font(.caption)
                             .foregroundStyle(.orange)
                     }

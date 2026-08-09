@@ -74,6 +74,10 @@ final class BLEBridgeHost: NSObject, ObservableObject {
     /// Notification subscription can arrive before the peripheral has
     /// completed link encryption. Delay CMD writes during that transition.
     private var commandReadyAt: CFAbsoluteTime = 0
+    /// CoreBluetooth can keep the ATT connection alive while its encryption
+    /// state has become invalid. Stop sending commands until a fresh session
+    /// has completed the encrypted + subscribed handshake.
+    private var commandSecurityHealthy = false
 
     override init() {
         super.init()
@@ -331,6 +335,7 @@ final class BLEBridgeHost: NSObject, ObservableObject {
         statusChar = nil
         cmdChar = nil
         commandReadyAt = 0
+        commandSecurityHealthy = false
         awaitingEventNotify = false
         connectingID = nil
         remoteStatus = "—"
@@ -433,7 +438,8 @@ final class BLEBridgeHost: NSObject, ObservableObject {
     }
 
     func sendCommand(_ bytes: [UInt8]) {
-        guard let p = active, let c = cmdChar, !bytes.isEmpty else { return }
+        guard phase == .ready, commandSecurityHealthy,
+              let p = active, let c = cmdChar, !bytes.isEmpty else { return }
         let wait = commandReadyAt - CFAbsoluteTimeGetCurrent()
         if wait > 0 {
             DispatchQueue.main.asyncAfter(deadline: .now() + wait) { [weak self] in
@@ -678,6 +684,7 @@ extension BLEBridgeHost: CBPeripheralDelegate {
             guard awaitingEventNotify || phase == .discovering else { return }
             awaitingEventNotify = false
             commandReadyAt = CFAbsoluteTimeGetCurrent() + 0.45
+            commandSecurityHealthy = true
             rememberPreferred(peripheral.identifier)
             userStoppedAuto = false
             resetReconnectBackoff()
@@ -761,7 +768,11 @@ extension BLEBridgeHost: CBPeripheralDelegate {
                 if ns.domain == CBATTError.errorDomain,
                    ns.code == CBATTError.insufficientAuthentication.rawValue
                     || ns.code == CBATTError.insufficientEncryption.rawValue {
-                    log(.info, "Pairing MR-Proxy — if bond fails after reflash: Forget MR-Proxy in Bluetooth settings")
+                    commandSecurityHealthy = false
+                    log(.info, "BLE encryption lost — restarting encrypted session automatically")
+                    central.cancelPeripheralConnection(peripheral)
+                    clearSession(phase: .failed)
+                    scheduleAutoReconnect()
                 }
             }
         }

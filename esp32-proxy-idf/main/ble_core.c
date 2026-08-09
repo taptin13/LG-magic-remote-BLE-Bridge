@@ -718,6 +718,9 @@ static void exec_cmd(const ble_core_msg_t *m) {
     case BLE_CMD_RELEASE_BUTTONS:
       ble_core_release_pressed_buttons();
       break;
+    case BLE_CMD_RESET_MAC_BOND:
+      mac_gatt_reset_mac_bond_raw();
+      break;
     default:
       break;
   }
@@ -907,5 +910,10 @@ void ble_core_cmd_flush_tx(void) {
 }
 void ble_core_cmd_release_buttons(void) {
   ble_core_msg_t m = {.cmd = BLE_CMD_RELEASE_BUTTONS};
+  ble_core_post(&m);
+}
+
+void ble_core_cmd_reset_mac_bond(void) {
+  ble_core_msg_t m = {.cmd = BLE_CMD_RESET_MAC_BOND};
   ble_core_post(&m);
 }

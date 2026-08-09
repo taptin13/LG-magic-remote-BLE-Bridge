@@ -36,6 +36,7 @@ typedef enum {
   BLE_CMD_GATTC_WRITE_NO_RSP,
   BLE_CMD_SM_INJECT,
   BLE_CMD_RELEASE_BUTTONS,
+  BLE_CMD_RESET_MAC_BOND,
 } ble_core_cmd_t;
 
 typedef enum {
@@ -156,6 +157,7 @@ void ble_core_cmd_gattc_write_no_rsp(uint16_t conn, uint16_t handle, const uint8
 void ble_core_cmd_sm_inject(uint16_t conn, uint8_t action, uint32_t passkey);
 void ble_core_cmd_flush_tx(void);
 void ble_core_cmd_release_buttons(void);
+void ble_core_cmd_reset_mac_bond(void);
 
 #ifdef __cplusplus
 }

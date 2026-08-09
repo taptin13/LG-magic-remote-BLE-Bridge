@@ -143,6 +143,12 @@ bool remote_manager_ready(void) { return bridge_state_remote() == REM_READY; }
 
 static bool s_have_cached_addr;
 
+bool remote_manager_cached_peer(ble_addr_t *out) {
+  if (!out || !s_have_cached_addr) return false;
+  *out = s_target;
+  return true;
+}
+
 static void load_cache(void) {
   nvs_handle_t h;
   s_have_cached_addr = false;

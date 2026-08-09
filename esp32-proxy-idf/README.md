@@ -25,6 +25,12 @@ Requires [PlatformIO](https://platformio.org/) (`pio`). First run downloads ESP-
 3. Mac subscribe Event → ready → SCAN burst `LGE MR25GA`
 4. Pair/bond remote → HID FD → Event Bus → GATT notify Mac
 
+If the proxy is moved to another Mac and the old Mac bond is stale, release the
+ESP32 BOOT button after power-on, then hold BOOT for 3 seconds. Firmware
+deletes Mac bonds while preserving the cached LG remote bond, then advertises
+again. The proxy is a custom GATT device, so it may not appear in macOS
+Bluetooth Settings for a **Forget** action.
+
 Command write requires encryption. After reflash: forget `MR-Proxy` on Mac if bond is stale.
 
 ## Module (`main/`)

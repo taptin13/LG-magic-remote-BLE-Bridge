@@ -16,6 +16,7 @@
 #include "bridge_metrics.h"
 #include "transport_channels.h"
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include "nvs_flash.h"
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
@@ -23,6 +24,7 @@
 #include "host/ble_store.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "driver/gpio.h"
 #include <math.h>
 #include <string.h>
 
@@ -31,6 +33,29 @@ void ble_store_config_init(void);
 
 static const char *TAG = "BOOT";
 static remote_decoder_t *s_dec;
+
+#define MAC_BOND_RESET_GPIO GPIO_NUM_0 /* ESP32 DevKit BOOT button; press after boot. */
+#define MAC_BOND_RESET_HOLD_MS 3000
+
+static void mac_bond_reset_button_task(void *arg) {
+  (void)arg;
+  bool fired = false;
+  uint32_t held_ms = 0;
+  for (;;) {
+    if (gpio_get_level(MAC_BOND_RESET_GPIO) == 0) {
+      if (held_ms < MAC_BOND_RESET_HOLD_MS) held_ms += 50;
+      if (!fired && held_ms >= MAC_BOND_RESET_HOLD_MS) {
+        fired = true;
+        ESP_LOGW(TAG, "BOOT held 3s — resetting Mac pairing only (remote bond kept)");
+        ble_core_cmd_reset_mac_bond();
+      }
+    } else {
+      held_ms = 0;
+      fired = false;
+    }
+    vTaskDelay(pdMS_TO_TICKS(50));
+  }
+}
 
 static void on_mac_cmd(const uint8_t *data, uint16_t len) {
   if (!data || len < 1 || !s_dec) return;
@@ -126,9 +151,12 @@ static void heartbeat_task(void *arg) {
       mac_gatt_set_status(mac_gatt_current_status());
     }
     if ((n % 5u) == 0u) {
-      ESP_LOGI(TAG, "HB overall=%s rem=%s mac=%d/%d stack_free=%uW", bridge_state_overall_name(),
-               remote_manager_state_name(), (int)mac_gatt_mac_connected(),
-               (int)mac_gatt_mac_ready(), (unsigned)uxTaskGetStackHighWaterMark(NULL));
+      ESP_LOGI(TAG, "HB overall=%s rem=%s mac=%d/%d stack_free=%uW heap_free=%lu heap_min=%lu",
+               bridge_state_overall_name(), remote_manager_state_name(),
+               (int)mac_gatt_mac_connected(), (int)mac_gatt_mac_ready(),
+               (unsigned)uxTaskGetStackHighWaterMark(NULL),
+               (unsigned long)esp_get_free_heap_size(),
+               (unsigned long)heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT));
       bridge_metrics_log();
     }
   }
@@ -184,6 +212,15 @@ void app_main(void) {
 
   ble_core_start();
   mac_bridge_start();
+  gpio_config_t reset_gpio = {
+      .pin_bit_mask = 1ULL << MAC_BOND_RESET_GPIO,
+      .mode = GPIO_MODE_INPUT,
+      .pull_up_en = GPIO_PULLUP_ENABLE,
+      .pull_down_en = GPIO_PULLDOWN_DISABLE,
+      .intr_type = GPIO_INTR_DISABLE,
+  };
+  ESP_ERROR_CHECK(gpio_config(&reset_gpio));
+  xTaskCreate(mac_bond_reset_button_task, "macBondReset", 2048, NULL, 2, NULL);
   /* ESP_LOG formatting plus metrics previously overflowed the 2KB task stack,
    * rebooting the bridge every heartbeat interval. Keep measured headroom. */
   xTaskCreate(heartbeat_task, "hb", 4096, NULL, 1, NULL);

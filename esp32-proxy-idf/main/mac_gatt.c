@@ -1,10 +1,12 @@
 #include "mac_gatt.h"
 #include "ble_core.h"
+#include "remote_manager.h"
 #include "bridge_metrics.h"
 #include "bridge_state.h"
 #include "config.h"
 #include "esp_log.h"
 #include "host/ble_hs.h"
+#include "host/ble_store.h"
 #include "host/ble_uuid.h"
 #include "host/util/util.h"
 #include "services/gap/ble_svc_gap.h"
@@ -32,6 +34,10 @@ static uint8_t s_own_addr_type;
 static uint32_t s_link_gen = 1;
 static bool s_adv_fast = true;
 static esp_timer_handle_t s_adv_slow_timer;
+static bool s_reset_mac_bond_pending;
+static bool s_reset_mac_peer_valid;
+static ble_addr_t s_reset_mac_peer_id;
+static ble_addr_t s_reset_mac_peer_ota;
 
 static const ble_uuid128_t uuid_svc =
   BLE_UUID128_INIT(PROXY_SVC_UUID128);
@@ -84,6 +90,68 @@ static bool link_encrypted(uint16_t conn_handle) {
   struct ble_gap_conn_desc d;
   if (ble_gap_conn_find(conn_handle, &d) != 0) return false;
   return d.sec_state.encrypted != 0;
+}
+
+static void remember_mac_peer(uint16_t conn_handle) {
+  struct ble_gap_conn_desc d;
+  if (ble_gap_conn_find(conn_handle, &d) != 0) return;
+  s_reset_mac_peer_id = d.peer_id_addr;
+  s_reset_mac_peer_ota = d.peer_ota_addr;
+  s_reset_mac_peer_valid = true;
+}
+
+static void reset_mac_bond_after_disconnect(void) {
+  if (!s_reset_mac_bond_pending) return;
+  s_reset_mac_bond_pending = false;
+  if (!s_reset_mac_peer_valid) {
+    ESP_LOGW(TAG, "Mac bond reset requested but peer identity was unavailable");
+    return;
+  }
+
+  int id_rc = ble_store_util_delete_peer(&s_reset_mac_peer_id);
+  int ota_rc = ble_store_util_delete_peer(&s_reset_mac_peer_ota);
+  s_reset_mac_peer_valid = false;
+  ESP_LOGI(TAG, "Mac bond reset: peer_id rc=%d peer_ota rc=%d (remote bond kept)", id_rc,
+           ota_rc);
+}
+
+static bool same_peer(const ble_addr_t *a, const ble_addr_t *b) {
+  return a && b && a->type == b->type && memcmp(a->val, b->val, sizeof(a->val)) == 0;
+}
+
+void mac_gatt_reset_mac_bond_raw(void) {
+  /* If a Mac is connected, delete exactly that peer after disconnect. */
+  if (s_conn != BLE_HS_CONN_HANDLE_NONE) {
+    remember_mac_peer(s_conn);
+    s_reset_mac_bond_pending = true;
+    ESP_LOGW(TAG, "Physical Mac pairing reset — disconnecting current Mac");
+    ble_core_do_disconnect(s_conn);
+    return;
+  }
+
+  /* Otherwise enumerate bonded peers and preserve the remote identity that
+   * remote_manager cached in NVS. Refuse to erase anything if that identity is
+   * unavailable; a physical recovery must never destroy the remote bond. */
+  ble_addr_t remote;
+  if (!remote_manager_cached_peer(&remote)) {
+    ESP_LOGE(TAG, "Physical Mac pairing reset refused — remote bond identity unavailable");
+    return;
+  }
+  ble_addr_t peers[8];
+  int count = 0;
+  if (ble_store_util_bonded_peers(peers, &count, 8) != 0) {
+    ESP_LOGE(TAG, "Physical Mac pairing reset failed — cannot enumerate bonds");
+    return;
+  }
+  int deleted = 0;
+  for (int i = 0; i < count; ++i) {
+    if (same_peer(&peers[i], &remote)) continue;
+    if (ble_store_util_delete_peer(&peers[i]) == 0) deleted++;
+  }
+  ESP_LOGW(TAG, "Physical Mac pairing reset complete — deleted=%d, remote bond kept", deleted);
+  s_adv_fast = true;
+  ble_gap_adv_stop();
+  mac_gatt_adv_start_raw();
 }
 
 static void update_status_payload(void) {
@@ -147,7 +215,17 @@ static int gatt_svr_chr_access(uint16_t conn_handle, uint16_t attr_handle,
     uint8_t buf[32];
     if (len > sizeof(buf)) len = sizeof(buf);
     int rc = ble_hs_mbuf_to_flat(ctxt->om, buf, len, NULL);
-    if (rc == 0 && s_cmd_cb) s_cmd_cb(buf, len);
+    if (rc == 0 && len == 1 && buf[0] == 0x04) {
+      /* Recovery command is accepted only over the encrypted command
+       * characteristic. Delete only the currently connected Mac peer after
+       * disconnect; the remote bond remains in NimBLE NVS. */
+      remember_mac_peer(conn_handle);
+      s_reset_mac_bond_pending = true;
+      ESP_LOGW(TAG, "Reset Mac pairing requested — disconnecting before deleting bond");
+      ble_core_cmd_disconnect(conn_handle);
+    } else if (rc == 0 && s_cmd_cb) {
+      s_cmd_cb(buf, len);
+    }
     return 0;
   }
   return BLE_ATT_ERR_UNLIKELY;
@@ -239,6 +317,7 @@ static int gap_event(struct ble_gap_event *event, void *arg) {
         s_subscribed = false;
         s_encrypted = false;
         s_ready = false;
+        s_reset_mac_peer_valid = false;
         s_link_gen++;
         bridge_session_bump_mac();
         bridge_state_set_mac(MAC_CONNECTED);
@@ -254,6 +333,7 @@ static int gap_event(struct ble_gap_event *event, void *arg) {
       return 0;
     case BLE_GAP_EVENT_DISCONNECT:
       ESP_LOGI(TAG, "DISCONNECT reason=%d", event->disconnect.reason);
+      reset_mac_bond_after_disconnect();
       bridge_metrics()->mac_disconnect_count++;
       bridge_metrics()->mac_disconnect_reason = event->disconnect.reason;
       s_conn = BLE_HS_CONN_HANDLE_NONE;

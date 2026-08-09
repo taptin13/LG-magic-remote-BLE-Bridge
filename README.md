@@ -51,7 +51,9 @@ If upload fails at high baud, retry with:
 UPLOAD_SPEED=115200 pio run -t upload --upload-port /dev/cu.YOURPORT
 ```
 
-After a reflash, if Mac pairing breaks: **System Settings → Bluetooth → Forget `MR-Proxy`**, then connect again from the app.
+If Mac pairing breaks: release the ESP32 BOOT button after power-on, then hold
+BOOT for 3 seconds. The firmware resets Mac pairing only, preserves the LG
+remote bond, and advertises again.
 
 ### 2. Build / run the Mac app
 
