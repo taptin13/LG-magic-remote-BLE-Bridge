@@ -429,11 +429,11 @@ struct ConnectionView: View {
 
     private var phaseLabel: String {
         switch model.host.phase {
-        case .idle: return "Idle"
+        case .idle: return "Waiting for ESP32"
         case .poweredOff: return "Bluetooth Off"
         case .scanning: return "Scanning…"
         case .connecting: return "Connecting…"
-        case .discovering: return "Subscribing…"
+        case .discovering: return "Pairing / preparing…"
         case .ready: return "Ready"
         case .failed: return "Failed"
         }

@@ -45,9 +45,11 @@ final class BLEBridgeHost: NSObject, ObservableObject {
     /// User tapped Disconnect → no auto reconnect until Reconnect/Scan.
     private var userStoppedAuto = false
     private var pairingRecoveryRequired = false
-    /// A single automatic retry handles transient CoreBluetooth bond errors
-    /// after sleep. A second failure is treated as a real pairing mismatch.
-    private var pairingRecoveryAttempted = false
+    /// Bond errors after sleep can be transient, but a persistent mismatch
+    /// cannot be repaired through CoreBluetooth without user-facing Forget.
+    /// Bound the fresh-discovery recovery so auto-connect does not loop forever.
+    private var pairingRecoveryFailures = 0
+    private static let maxPairingRecoveryFailures = 3
     private var autoConnectScheduled = false
     private var reconnectScheduleGeneration: UInt64 = 0
     private var connectingID: UUID?
@@ -58,7 +60,7 @@ final class BLEBridgeHost: NSObject, ObservableObject {
     nonisolated(unsafe) private var sessionGeneration: UInt64 = 0
     /// Exponential reconnect backoff index (reset when `.ready`).
     private var reconnectAttempt = 0
-    private static let reconnectBackoff: [TimeInterval] = [1, 2, 5, 10, 30]
+    private static let reconnectBackoff: [TimeInterval] = [0.5, 1, 2, 5, 15, 30]
     private var wakeRecoveryGeneration: UInt64 = 0
     /// Invalidates delayed reconnect attempts across a CoreBluetooth radio reset.
     private var radioRecoveryGeneration: UInt64 = 0
@@ -69,6 +71,9 @@ final class BLEBridgeHost: NSObject, ObservableObject {
     /// Updated on the CoreBluetooth queue; used only to avoid redundant pings
     /// while the peripheral is already delivering event notifications.
     nonisolated(unsafe) private var lastEventReceivedAt: CFAbsoluteTime = 0
+    /// Notification subscription can arrive before the peripheral has
+    /// completed link encryption. Delay CMD writes during that transition.
+    private var commandReadyAt: CFAbsoluteTime = 0
 
     override init() {
         super.init()
@@ -121,7 +126,7 @@ final class BLEBridgeHost: NSObject, ObservableObject {
         invalidateScheduledReconnects()
         userStoppedAuto = false
         pairingRecoveryRequired = false
-        pairingRecoveryAttempted = false
+        pairingRecoveryFailures = 0
         requiresPairingReset = false
         autoConnect = true
         reconnectAttempt = 0
@@ -138,7 +143,7 @@ final class BLEBridgeHost: NSObject, ObservableObject {
             invalidateScheduledReconnects()
             userStoppedAuto = false
             pairingRecoveryRequired = false
-            pairingRecoveryAttempted = false
+            pairingRecoveryFailures = 0
             requiresPairingReset = false
             reconnectAttempt = 0
             beginAutoConnect(reason: "auto-connect on")
@@ -171,7 +176,7 @@ final class BLEBridgeHost: NSObject, ObservableObject {
         let generation = wakeRecoveryGeneration
         invalidateScheduledReconnects()
         reconnectAttempt = 0
-        pairingRecoveryAttempted = false
+        pairingRecoveryFailures = 0
         pairingRecoveryRequired = false
         requiresPairingReset = false
         log(.matrix, "Recovering BLE after system wake")
@@ -325,6 +330,7 @@ final class BLEBridgeHost: NSObject, ObservableObject {
         eventChar = nil
         statusChar = nil
         cmdChar = nil
+        commandReadyAt = 0
         awaitingEventNotify = false
         connectingID = nil
         remoteStatus = "—"
@@ -397,6 +403,9 @@ final class BLEBridgeHost: NSObject, ObservableObject {
     }
 
     private func scheduleAutoReconnect() {
+        // A pairing mismatch can clear after the Bluetooth controller settles.
+        // Keep retrying automatically; this flag must not strand the bridge
+        // after sleep.
         guard autoConnect, !userStoppedAuto, !pairingRecoveryRequired, bluetoothOK else { return }
         guard !autoConnectScheduled else { return }
         autoConnectScheduled = true
@@ -425,6 +434,13 @@ final class BLEBridgeHost: NSObject, ObservableObject {
 
     func sendCommand(_ bytes: [UInt8]) {
         guard let p = active, let c = cmdChar, !bytes.isEmpty else { return }
+        let wait = commandReadyAt - CFAbsoluteTimeGetCurrent()
+        if wait > 0 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + wait) { [weak self] in
+                self?.sendCommand(bytes)
+            }
+            return
+        }
         let data = Data(bytes)
         /* CBPeripheral I/O must use the central’s queue. */
         bleQueue.async {
@@ -551,19 +567,14 @@ extension BLEBridgeHost: CBCentralManagerDelegate {
                ns?.code == CBError.peerRemovedPairingInformation.rawValue {
                 preferredPeripheralID = nil
                 onPrefsChanged?()
-                if !pairingRecoveryAttempted {
-                    pairingRecoveryAttempted = true
-                    log(.info, "Pairing state reset by macOS — retrying once")
-                    clearSession(phase: .idle)
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-                        guard let self, self.autoConnect, !self.userStoppedAuto else { return }
-                        self.beginAutoConnect(reason: "pairing recovery")
-                    }
-                    return
+                pairingRecoveryFailures += 1
+                if pairingRecoveryFailures < Self.maxPairingRecoveryFailures {
+                    log(.info, "Pairing state reset by macOS — fresh discovery \(pairingRecoveryFailures)/\(Self.maxPairingRecoveryFailures)")
+                } else {
+                    pairingRecoveryRequired = true
+                    requiresPairingReset = true
+                    log(.error, "Bond Mac↔ESP still mismatched after \(Self.maxPairingRecoveryFailures) attempts — automatic recovery paused")
                 }
-                pairingRecoveryRequired = true
-                requiresPairingReset = true
-                log(.error, "Bond Mac↔ESP mismatched after retry. Bluetooth → Forget MR-Proxy, then Reconnect.")
             }
             clearSession(phase: .failed)
             scheduleAutoReconnect()
@@ -666,10 +677,11 @@ extension BLEBridgeHost: CBPeripheralDelegate {
             }
             guard awaitingEventNotify || phase == .discovering else { return }
             awaitingEventNotify = false
+            commandReadyAt = CFAbsoluteTimeGetCurrent() + 0.45
             rememberPreferred(peripheral.identifier)
             userStoppedAuto = false
             resetReconnectBackoff()
-            pairingRecoveryAttempted = false
+            pairingRecoveryFailures = 0
             pairingRecoveryRequired = false
             requiresPairingReset = false
             phase = .ready

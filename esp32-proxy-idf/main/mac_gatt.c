@@ -7,9 +7,9 @@
 #include "host/ble_hs.h"
 #include "host/ble_uuid.h"
 #include "host/util/util.h"
-#include "host/ble_store.h"
 #include "services/gap/ble_svc_gap.h"
 #include "services/gatt/ble_svc_gatt.h"
+#include "esp_timer.h"
 #include <string.h>
 static const char *TAG = "MAC";
 
@@ -30,6 +30,8 @@ static uint8_t s_status_payload[5] = {
 static mac_cmd_cb_t s_cmd_cb;
 static uint8_t s_own_addr_type;
 static uint32_t s_link_gen = 1;
+static bool s_adv_fast = true;
+static esp_timer_handle_t s_adv_slow_timer;
 
 static const ble_uuid128_t uuid_svc =
   BLE_UUID128_INIT(PROXY_SVC_UUID128);
@@ -165,6 +167,14 @@ static void on_subscribe(uint16_t conn_handle, uint16_t attr_handle, uint8_t cur
 
 static int gap_event(struct ble_gap_event *event, void *arg);
 
+static void adv_slow_timer_cb(void *arg) {
+  (void)arg;
+  if (s_conn != BLE_HS_CONN_HANDLE_NONE) return;
+  s_adv_fast = false;
+  ble_core_cmd_adv_stop();
+  ble_core_cmd_adv_start();
+}
+
 void mac_gatt_adv_start_raw(void) {
   struct ble_gap_adv_params adv = {0};
   struct ble_hs_adv_fields fields = {0};
@@ -193,13 +203,26 @@ void mac_gatt_adv_start_raw(void) {
 
   adv.conn_mode = BLE_GAP_CONN_MODE_UND;
   adv.disc_mode = BLE_GAP_DISC_MODE_GEN;
+  if (s_adv_fast) {
+    adv.itvl_min = 32;  /* 20 ms: catch a returning Mac quickly. */
+    adv.itvl_max = 48;  /* 30 ms */
+  } else {
+    adv.itvl_min = 160; /* 100 ms: reduce idle radio duty cycle. */
+    adv.itvl_max = 240; /* 150 ms */
+  }
   rc = ble_gap_adv_start(s_own_addr_type, NULL, BLE_HS_FOREVER, &adv, gap_event, NULL);
-  ESP_LOGI(TAG, "ADV \"%s\" rc=%d (Mac ENC=%d)", name, rc, PROXY_REQUIRE_MAC_ENC);
+  ESP_LOGI(TAG, "ADV \"%s\" rc=%d interval=%s (Mac ENC=%d)", name, rc,
+           s_adv_fast ? "fast" : "slow", PROXY_REQUIRE_MAC_ENC);
+  if (rc == 0 && s_adv_fast && s_adv_slow_timer) {
+    (void)esp_timer_stop(s_adv_slow_timer);
+    (void)esp_timer_start_once(s_adv_slow_timer, 15000000);
+  }
   bridge_state_set_mac(MAC_ADV);
   mac_gatt_set_status_raw(ST_WAIT_MAC);
 }
 
 void mac_gatt_start_advertise(void) {
+  s_adv_fast = true;
   ble_core_cmd_adv_start();
 }
 
@@ -243,6 +266,7 @@ static int gap_event(struct ble_gap_event *event, void *arg) {
       /* Mac gone — flush TX + clear pressed (cannot notify). */
       ble_core_cmd_flush_tx();
       mac_gatt_set_status(ST_WAIT_MAC);
+      s_adv_fast = true;
       ble_core_cmd_adv_start();
       return 0;
     case BLE_GAP_EVENT_SUBSCRIBE:
@@ -266,12 +290,11 @@ static int gap_event(struct ble_gap_event *event, void *arg) {
       }
       return 0;
     case BLE_GAP_EVENT_REPEAT_PAIRING:
-      {
-        struct ble_gap_conn_desc desc;
-        if (ble_gap_conn_find(event->repeat_pairing.conn_handle, &desc) == 0)
-          ble_store_util_delete_peer(&desc.peer_id_addr);
-        return BLE_GAP_REPEAT_PAIRING_RETRY;
-      }
+      /* Never delete NVS bond data during ordinary reconnects. The previous
+       * delete+retry policy created the Mac/ESP split-brain state that
+       * CoreBluetooth reports as peerRemovedPairingInformation. */
+      ESP_LOGI(TAG, "REPEAT_PAIRING — keep stored Mac bond");
+      return BLE_GAP_REPEAT_PAIRING_IGNORE;
     default:
       return 0;
   }
@@ -279,6 +302,13 @@ static int gap_event(struct ble_gap_event *event, void *arg) {
 
 void mac_gatt_init(mac_cmd_cb_t cmd_cb) {
   s_cmd_cb = cmd_cb;
+  const esp_timer_create_args_t timer_args = {
+      .callback = adv_slow_timer_cb,
+      .arg = NULL,
+      .dispatch_method = ESP_TIMER_TASK,
+      .name = "mac_adv_slow",
+  };
+  esp_timer_create(&timer_args, &s_adv_slow_timer);
   ble_svc_gap_init();
   ble_svc_gatt_init();
   int rc = ble_gatts_count_cfg(gatt_svcs);
